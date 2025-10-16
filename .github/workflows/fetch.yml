@@ -3,20 +3,22 @@ name: Fetch Challenge Files
 on:
   workflow_dispatch:
 
+permissions:
+  id-token: write  # Needed for OIDC
+  contents: read
+
 jobs:
   fetch-challenge:
     runs-on: ubuntu-latest
     steps:
-
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Configure AWS CLI
-        uses: aws-actions/configure-aws-credentials@v2
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4  # Use v4 for OIDC
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-east-1
+          role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
+          aws-region: ap-east-1  # Note: different region!
 
       - name: Login to ECR
         run: |
@@ -24,36 +26,57 @@ jobs:
 
       - name: Pull challenge Docker image
         run: |
+          # Try the exact repository path from your workflow
           docker pull 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest
 
-      - name: Create container
-        id: create-container
+      - name: Create container and extract files
         run: |
+          # Create container and extract files in one step
           CONTAINER_ID=$(docker create 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest /bin/sh)
-          echo "CONTAINER_ID=$CONTAINER_ID" >> $GITHUB_ENV
-
-      - name: Export filesystem from container
-        run: |
           mkdir -p exported_fs
           docker cp $CONTAINER_ID:/ ./exported_fs/
+          docker rm $CONTAINER_ID
 
-      - name: Find likely encrypted flag files
+      - name: Explore extracted filesystem
         run: |
-          echo "Searching for files with likely flag data..."
-          find exported_fs -type f -name "not-flag-yet" -exec chmod +r {} \; 
-          # adjust the filename pattern if the encrypted flag has a different name
+          echo "=== Exploring extracted files ==="
+          find exported_fs -type f -name "*flag*" -o -name "*secret*" -o -name "*.txt" -o -name "*.json" -o -name "*.yaml" -o -name "*.yml" 2>/dev/null | head -20
+          
+          echo "=== Checking for interesting files ==="
+          ls -la exported_fs/
+          find exported_fs -name "not-flag-yet" 2>/dev/null && echo "Found 'not-flag-yet' file!"
+          
+          echo "=== Checking common directories ==="
+          ls -la exported_fs/etc/ 2>/dev/null || echo "No /etc directory"
+          ls -la exported_fs/root/ 2>/dev/null || echo "No /root directory" 
+          ls -la exported_fs/home/ 2>/dev/null || echo "No /home directory"
+          ls -la exported_fs/opt/ 2>/dev/null || echo "No /opt directory"
+          ls -la exported_fs/tmp/ 2>/dev/null || echo "No /tmp directory"
 
-      - name: Run decryption script
+      - name: Check file contents
         run: |
-          python3 decrypt_script.py exported_fs/ decrypt_output.txt
+          echo "=== Checking file contents ==="
+          # Check if not-flag-yet exists and read it
+          if [ -f "exported_fs/not-flag-yet" ]; then
+            echo "Found 'not-flag-yet' file. Contents:"
+            cat exported_fs/not-flag-yet
+          fi
+          
+          # Check for any text files
+          for file in $(find exported_fs -name "*.txt" -type f 2>/dev/null); do
+            echo "=== Contents of $file ==="
+            cat "$file" || echo "Could not read $file"
+          done
+
+      - name: Check environment variables from image
+        run: |
+          echo "=== Checking image environment ==="
+          docker run --rm --entrypoint /bin/sh 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest -c "env" | grep -i -E "(flag|secret|key)" || echo "No flag-related environment variables"
 
       - name: Upload extracted files as artifact
         uses: actions/upload-artifact@v4
         with:
           name: challenge-files
-          # any output your decrypt_script.py might write
           path: |
-            exported_fs/**
-            image_layers/**
-            *.txt
-            decrypt_output*
+            exported_fs/
+          retention-days: 1

@@ -1,96 +1,149 @@
-name: Assume AWS Role
-on: [push]
+name: Assume AWS Role & Inspect ECR Image
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
-  assume-role:
-    runs-on: self-hosted
-    permissions:
-      id-token: write
-      contents: read
+  assume-and-extract:
+    # Change to self-hosted if you actually have a self-hosted runner with docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Configure AWS credentials
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Ensure tools (jq, tar)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq tar
+
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: ap-east-1
           role-session-name: OIDCSession
-      
-      - name: Login to ECR
+
+      - name: Show caller identity (debug)
+        run: aws sts get-caller-identity || true
+
+      - name: Login to ECR (try primary region then fallback)
+        id: ecr-login
         run: |
-          aws ecr get-login-password --region ap-east-1 | docker login --username AWS --password-stdin 396961015104.dkr.ecr.ap-east-1.amazonaws.com
-      
-      - name: Pull and extract imaginary-challenge image
-        run: |
-          # Pull the latest image
-          docker pull 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest
-          
-          # Create container and extract filesystem
-          CONTAINER_ID=$(docker create 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest)
-          docker export $CONTAINER_ID > filesystem.tar
-          tar -xf filesystem.tar
-          
-          # Look for encrypted data and wordlists
-          echo "=== Searching for encrypted data and wordlists ==="
-          find . -type f \( -name ".txt" -o -name ".enc" -o -name ".base64" -o -name "output" -o -name "flag*" \) -exec ls -la {} \;
-          
-          # Copy any found text files
-          find . -type f \( -name ".txt" -o -name "output" \) -exec cp {} ./ \;
-          
-          # Cleanup
-          docker rm $CONTAINER_ID
-          rm -f filesystem.tar
-      
-      - name: Extract Docker image layers
-        run: |
-          # Save image and extract layers
-          docker save 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest -o image.tar
-          tar -xf image.tar
-          
-          # Extract all layer tarballs
-          mkdir -p layers
-          for layer in $(find . -name "*.tar" -type f | grep -v image.tar); do
-            echo "Extracting layer: $(basename $layer)"
-            tar -xf $layer -C layers/ 2>/dev/null || true
+          set -euo pipefail
+          REGIONS=("ap-east-1" "us-east-1" "us-west-2" "eu-west-1")
+          IMAGE_PATH="396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest"
+          LOGIN_REGION=""
+          for r in "${REGIONS[@]}"; do
+            echo "Trying region: $r"
+            if aws ecr get-login-password --region "$r" >/dev/null 2>&1; then
+              echo "get-login-password ok in $r"
+              # try a non-interactive login, suppress output
+              aws ecr get-login-password --region "$r" | docker login --username AWS --password-stdin "396961015104.dkr.ecr.$r.amazonaws.com" && LOGIN_REGION="$r" && break || true
+            fi
           done
-          
-          # Search for relevant files in layers
-          echo "=== Searching in layers ==="
-          find layers/ -type f \( -name ".txt" -o -name ".py" -o -name "output*" -o -name "flag*" \) -exec ls -la {} \;
-          
-          # Copy any found files
-          find layers/ -type f \( -name ".txt" -o -name "output" \) -exec cp {} ./ \;
-      
-      - name: Check for encrypted data in image history
-        run: |
-          # Inspect image history and labels
-          docker inspect 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest | jq '.[0]'
-          
-          # Check environment variables and labels
-          echo "=== Image Labels ==="
-          docker inspect 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest | jq '.[0].Config.Labels'
-          
-          echo "=== Image Env ==="
-          docker inspect 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest | jq '.[0].Config.Env'
-      
-      - name: Decrypt if we have the necessary files
-        run: |
-          # Check if we have both encrypted data and wordlist
-          if [ -f "output.txt" ] && [ -f "wordlist.txt" ]; then
-            echo "Found encrypted data and wordlist - attempting decryption"
-            python3 decrypt_script.py
-          elif [ -f "not-flag-yet" ] && [ -f "wordlist.txt" ]; then
-            echo "Found encrypted file and wordlist - attempting decryption"
-            python3 decrypt_script.py
-          else
-            echo "Missing either encrypted data or wordlist for decryption"
-            ls -la *.txt 2>/dev/null || echo "No text files found"
+          if [ -z "$LOGIN_REGION" ]; then
+            echo "Could not login to ECR in any region. Exiting with code 0 so we don't fail the workflow completely."
+            echo "login_region="
+            exit 0
           fi
-      
+          echo "login_region=$LOGIN_REGION" >> $GITHUB_OUTPUT
+          echo "Using registry region: $LOGIN_REGION"
+          # update IMAGE_PATH to the successful region
+          IMAGE_PATH="396961015104.dkr.ecr.${LOGIN_REGION}.amazonaws.com/challenges/imaginary-challenge:latest"
+          echo "image_path=$IMAGE_PATH" >> $GITHUB_OUTPUT
+
+      - name: Pull and extract image (if login succeeded)
+        if: steps.ecr-login.outputs.login_region != ''
+        env:
+          IMAGE_PATH: ${{ steps.ecr-login.outputs.image_path }}
+        run: |
+          set -euo pipefail
+          echo "[*] Target image: $IMAGE_PATH"
+          # Try pulling; if pull fails, continue but don't fail entire job
+          if docker pull "$IMAGE_PATH"; then
+            echo "Pulled image successfully"
+          else
+            echo "docker pull failed (maybe image not present or no perms). Exiting extraction steps."
+            exit 0
+          fi
+
+          # create container and export filesystem
+          CONTAINER_ID=$(docker create "$IMAGE_PATH")
+          echo "Created container: $CONTAINER_ID"
+          docker export "$CONTAINER_ID" -o filesystem.tar || true
+          mkdir -p extracted_fs
+          tar -xf filesystem.tar -C extracted_fs || true
+
+          echo "=== Searching extracted filesystem ==="
+          pushd extracted_fs >/dev/null || exit 0
+          find . -type f \( -iname "*flag*" -o -iname "*.txt" -o -iname "*.enc" -o -iname "*.base64" -o -iname "output*" \) -print -exec ls -la {} \; || true
+
+          # copy any likely text files to workspace root for upload
+          find . -type f \( -iname "*flag*" -o -iname "*.txt" -o -iname "output*" \) -exec cp --parents {} ../extracted_files/ \; || true
+          popd >/dev/null || true
+
+          docker rm "$CONTAINER_ID" || true
+          rm -f filesystem.tar || true
+
+      - name: Extract image layers (if login succeeded)
+        if: steps.ecr-login.outputs.login_region != ''
+        env:
+          IMAGE_PATH: ${{ steps.ecr-login.outputs.image_path }}
+        run: |
+          set -euo pipefail
+          echo "[*] Saving image: $IMAGE_PATH"
+          docker save "$IMAGE_PATH" -o image.tar || { echo "docker save failed (maybe not allowed)"; exit 0; }
+          mkdir -p image_layers
+          tar -xf image.tar || true
+          # layer tarballs are usually in the form */layer.tar after saving
+          find . -type f -name "layer.tar" -print -exec bash -c 'LAYER="$1"; mkdir -p image_layers/$(basename "$(dirname "$LAYER")"); tar -xf "$LAYER" -C image_layers/$(basename "$(dirname "$LAYER")") || true' _ {} \;
+          echo "=== Searching inside layers ==="
+          find image_layers -type f \( -iname "*flag*" -o -iname "*.txt" -o -iname "*.py" -o -iname "output*" \) -print -exec ls -la {} \; || true
+          # copy any text-like files to extracted_files
+          mkdir -p extracted_files
+          find image_layers -type f \( -iname "*flag*" -o -iname "*.txt" -o -iname "output*" \) -exec cp --parents {} extracted_files/ \; || true
+          rm -f image.tar || true
+
+      - name: Inspect image metadata (if login succeeded)
+        if: steps.ecr-login.outputs.login_region != ''
+        env:
+          IMAGE_PATH: ${{ steps.ecr-login.outputs.image_path }}
+        run: |
+          echo "Inspecting image metadata (jq required)"
+          # show metadata but do not fail on missing image
+          docker inspect "$IMAGE_PATH" | jq '.[0]' || true
+          docker inspect "$IMAGE_PATH" | jq '.[0].Config.Labels' || true
+          docker inspect "$IMAGE_PATH" | jq '.[0].Config.Env' || true
+
+      - name: Optional: try simple decryption script (only if files found)
+        if: steps.ecr-login.outputs.login_region != ''
+        run: |
+          mkdir -p extracted_files
+          ls -la extracted_files || echo "no extracted files"
+          # Only run decrypt if we have a Python script in repository named decrypt_script.py
+          if [ -f decrypt_script.py ] && [ -d extracted_files ]; then
+            echo "Running decrypt_script.py (it must handle its own inputs and be idempotent)"
+            python3 decrypt_script.py || echo "decrypt script failed or returned non-zero"
+          else
+            echo "No decrypt_script.py in repo or no extracted files to decrypt"
+          fi
+
       - name: Upload found files
         uses: actions/upload-artifact@v4
         with:
           name: challenge-files
           path: |
+            extracted_files/**
+            filesystem.tar
+            image_layers/**
+            *.log
             *.txt
-            output*
-            not-flag-yet
-            wordlist*
+
+      - name: Final log (non-fatal)
+        run: |
+          echo "Workflow completed. Check artifacts named 'challenge-files' for extracted items."

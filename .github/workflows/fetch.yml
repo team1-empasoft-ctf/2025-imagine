@@ -1,30 +1,44 @@
-name: Assume imaginary-challenge role
+name: Deploy to AWS ECR
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
-  assume:
+  deploy:
+    name: Build and Push to ECR
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
 
     steps:
-      - name: Configure AWS credentials
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
+          role-to-assume: arn:aws:iam::396961015104:role/GitHubActionsRole
           aws-region: us-east-1
 
-      - name: Verify identity
-        run: aws sts get-caller-identity
+      - name: Get ECR Login Password and Authenticate Docker
+        run: |
+          echo "🔑 Logging into Amazon ECR..."
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 396961015104.dkr.ecr.us-east-1.amazonaws.com
+          echo "✅ Login successful"
 
-      - name: List ECR repos
-        run: aws ecr describe-repositories || echo "no perms"
+      - name: Build Docker Image
+        run: |
+          echo "🐳 Building Docker image..."
+          docker build -t 396961015104.dkr.ecr.us-east-1.amazonaws.com/2025-imagine:latest .
+          echo "✅ Build complete"
 
-      - name: List S3 buckets
-        run: aws s3 ls || echo "no perms"
-
-      - name: Try listing secrets
-        run: aws secretsmanager list-secrets || echo "no perms"
+      - name: Push Docker Image to ECR
+        run: |
+          echo "📦 Pushing Docker image..."
+          docker push 396961015104.dkr.ecr.us-east-1.amazonaws.com/2025-imagine:latest
+          echo "🚀 Push complete"

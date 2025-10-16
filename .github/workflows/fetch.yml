@@ -1,8 +1,8 @@
-name: Find image flag
+name: Assume AWS Role & Extract Image
 on: [push]
 
 jobs:
-  find-flag:
+  assume-role:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -17,55 +17,94 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: ap-east-1
-          role-session-name: find-flag-session
+          role-session-name: OIDCSession
 
       - name: Login to ECR
         run: |
-          aws ecr get-login-password --region ap-east-1 \
-            | docker login --username AWS --password-stdin 396961015104.dkr.ecr.ap-east-1.amazonaws.com
+          aws ecr get-login-password --region ap-east-1 | docker login --username AWS --password-stdin 396961015104.dkr.ecr.ap-east-1.amazonaws.com
 
       - name: Pull image
-        run: docker pull 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest
-
-      - name: Inspect image labels (troll may appear here)
-        run: docker inspect --format '{{json .Config.Labels}}' 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest || true
-
-      - name: Export container filesystem
         run: |
-          CID=$(docker create 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest /bin/sh)
-          docker export "$CID" -o fs.tar
+          docker pull 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest
+
+      - name: Create container and export filesystem
+        run: |
+          # create container (do not run it)
+          CID=$(docker create 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest /bin/sh) \
+            && echo "$CID" > container.id
+
+          # export the whole filesystem tar and extract to exported_fs/
+          docker export "$CID" -o filesystem.tar
           mkdir -p exported_fs
-          tar -xf fs.tar -C exported_fs
-          docker rm "$CID"
-          ls -la exported_fs | head -40
+          tar -xf filesystem.tar -C exported_fs
 
-      - name: Grep for flags and suspicious files in exported FS
-        run: |
-          cd exported_fs || exit 0
-          echo "=== Grep for flag patterns ==="
-          grep -RI --binary-files=without-match -nE 'CTF\{[^}]+\}|FLAG[:= ]|flag|ECTF\{[^}]+\}' . || true
-          echo "=== Find likely files ==="
-          find . -type f \( -iname "*flag*" -o -iname "*.txt" -o -iname "*.enc" -o -iname "not-flag-yet" -o -iname "output*" \) -print -exec sed -n '1,200p' {} \; 2>/dev/null || true
+          # attempt to docker cp sensitive file (bypasses permission bits inside exported fs)
+          # if /not-flag-yet exists inside container, copy it out
+          if docker inspect --format='{{json .}}' "$CID" >/dev/null 2>&1; then
+            # try copying known paths (adjust if the file is elsewhere)
+            docker cp "$CID":/not-flag-yet exported_fs/not-flag-yet 2>/dev/null || true
+          fi
 
-      - name: Extract layers and search them
+          # remove the container, remove tar
+          docker rm "$CID" || true
+          rm -f filesystem.tar || true
+
+      - name: Fix permissions so CI can read files (prevents EACCES)
         run: |
-          docker save 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest -o image.tar
-          mkdir -p image_contents layers_extracted
-          tar -xf image.tar -C image_contents
-          for layer in $(find image_contents -type f -name "layer.tar"); do
-            d=$(mktemp -d)
-            tar -xf "$layer" -C "$d" || true
-            cp -r "$d"/* layers_extracted/ 2>/dev/null || true
+          # make files readable and directories accessible
+          chmod -R a+r exported_fs || true
+          find exported_fs -type d -exec chmod a+rx {} \; || true
+
+          # show found files (for debugging)
+          echo "=== exported_fs listing ==="
+          ls -la exported_fs || true
+          echo "=== sample content preview (first 100 bytes) ==="
+          for f in exported_fs/*; do
+            if [ -f "$f" ]; then
+              echo "---- $f ----"
+              head -c 100 "$f" || true
+            fi
           done
-          echo "=== Grep layers ==="
-          grep -RI --binary-files=without-match -nE 'CTF\{[^}]+\}|FLAG[:= ]|flag|ECTF\{[^}]+\}' layers_extracted || true
 
-      - name: Upload exported filesystem and results
+      - name: Optional: extract image layers (if you want to search deeper)
+        run: |
+          docker save 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest -o image.tar || true
+          mkdir -p image_layers
+          # extract layer tars if present
+          tar -tf image.tar | grep -E '\.tar$' >/dev/null 2>&1 || true
+          for t in $(tar -tf image.tar 2>/dev/null | grep -E '\.tar$' || true); do
+            mkdir -p tmp_extract
+            tar -xf image.tar "$t" -C tmp_extract || continue
+            LAYER_TAR=$(find tmp_extract -maxdepth 1 -type f -name '*.tar' | head -n1)
+            if [ -n "$LAYER_TAR" ]; then
+              mkdir -p image_layers/$(basename "$t" .tar)
+              tar -xf "$LAYER_TAR" -C image_layers/$(basename "$t" .tar) || true
+            fi
+            rm -rf tmp_extract
+          done
+          # make those readable too
+          chmod -R a+r image_layers || true
+
+      - name: Attempt decrypt (if files present)
+        run: |
+          # Adjust the decrypt command to match your script's CLI
+          if [ -f exported_fs/not-flag-yet ] && [ -f exported_fs/wordlist.txt ]; then
+            echo "Found encrypted file and wordlist — running decrypt"
+            python3 decrypt_script.py exported_fs/not-flag-yet exported_fs/wordlist.txt || true
+          elif [ -f exported_fs/output.txt ] && [ -f exported_fs/wordlist.txt ]; then
+            echo "Found output.txt and wordlist — running decrypt"
+            python3 decrypt_script.py exported_fs/output.txt exported_fs/wordlist.txt || true
+          else
+            echo "No matching encrypted files + wordlist found in exported_fs"
+            ls -la exported_fs || true
+          fi
+
+      - name: Upload found files
         uses: actions/upload-artifact@v4
         with:
-          name: image-export-and-findings
+          name: challenge-files
           path: |
             exported_fs/**
-            fs.tar
-            image.tar
-            layers_extracted/**
+            image_layers/**
+            *.txt
+            decrypt_output*  # any output your decrypt_script.py might write

@@ -1,4 +1,3 @@
-# .github/workflows/fetch.yml
 name: Explore AWS Permissions & ECR
 
 on:

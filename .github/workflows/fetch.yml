@@ -1,4 +1,4 @@
-name: Assume AWS Role
+name: Explore AWS Permissions
 on: [push]
 
 jobs:
@@ -14,16 +14,58 @@ jobs:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: us-east-1
           
-      - name: List ECR repositories
+      - name: Check Current Identity
         run: |
-          aws ecr describe-repositories
-          
-      - name: Access ECR images
-        run: |
-          # Try to get ECR login token and pull images
-          aws ecr get-login-password | docker login --username AWS --password-stdin 396961015104.dkr.ecr.us-east-1.amazonaws.com
-          
-      - name: Check IAM permissions
-        run: |
-          aws iam list-attached-role-policies --role-name imaginary-challenge
           aws sts get-caller-identity
+
+      - name: Try Various AWS Services
+        run: |
+          # S3 - List buckets and contents
+          echo "=== Checking S3 ==="
+          aws s3 ls || echo "No S3 list access"
+          
+          # Lambda functions
+          echo "=== Checking Lambda ==="
+          aws lambda list-functions || echo "No Lambda access"
+          
+          # EC2 instances
+          echo "=== Checking EC2 ==="
+          aws ec2 describe-instances --max-items 5 || echo "No EC2 access"
+          
+          # Secrets Manager
+          echo "=== Checking Secrets Manager ==="
+          aws secretsmanager list-secrets --max-results 10 || echo "No Secrets Manager access"
+          
+          # SSM Parameter Store
+          echo "=== Checking SSM Parameters ==="
+          aws ssm describe-parameters --max-results 10 || echo "No SSM access"
+          
+          # CloudFormation
+          echo "=== Checking CloudFormation ==="
+          aws cloudformation list-stacks --max-results 10 || echo "No CloudFormation access"
+          
+          # ECR - Even if empty, try different regions
+          echo "=== Checking ECR in different regions ==="
+          for region in us-east-1 us-west-2 eu-west-1; do
+            echo "Region: $region"
+            aws ecr describe-repositories --region $region || echo "No access in $region"
+          done
+
+      - name: Try ECR Operations Anyway
+        run: |
+          # Even if no repos visible, try common ECR operations
+          echo "=== Attempting ECR operations ==="
+          # Try to create a test repository (might fail but could reveal permissions)
+          aws ecr create-repository --repository-name test-probe --image-scanning-configuration scanOnPush=true || echo "Cannot create repos"
+          
+          # Try to get authorization token with different regions
+          aws ecr get-authorization-token --output text || echo "Cannot get auth token"
+
+      - name: Explore Environment
+        run: |
+          # Check if there are any environment variables or metadata
+          echo "=== Environment Info ==="
+          env | grep -i aws
+          echo "=== Current directory ==="
+          pwd
+          ls -la

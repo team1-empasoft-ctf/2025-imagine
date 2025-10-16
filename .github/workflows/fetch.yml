@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  id-token: write  # Needed for OIDC
+  id-token: write
   contents: read
 
 jobs:
@@ -15,10 +15,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4  # Use v4 for OIDC
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
-          aws-region: ap-east-1  # Note: different region!
+          aws-region: ap-east-1
 
       - name: Login to ECR
         run: |
@@ -26,12 +26,10 @@ jobs:
 
       - name: Pull challenge Docker image
         run: |
-          # Try the exact repository path from your workflow
           docker pull 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest
 
       - name: Create container and extract files
         run: |
-          # Create container and extract files in one step
           CONTAINER_ID=$(docker create 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest /bin/sh)
           mkdir -p exported_fs
           docker cp $CONTAINER_ID:/ ./exported_fs/
@@ -56,13 +54,11 @@ jobs:
       - name: Check file contents
         run: |
           echo "=== Checking file contents ==="
-          # Check if not-flag-yet exists and read it
           if [ -f "exported_fs/not-flag-yet" ]; then
             echo "Found 'not-flag-yet' file. Contents:"
             cat exported_fs/not-flag-yet
           fi
           
-          # Check for any text files
           for file in $(find exported_fs -name "*.txt" -type f 2>/dev/null); do
             echo "=== Contents of $file ==="
             cat "$file" || echo "Could not read $file"
@@ -77,6 +73,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: challenge-files
-          path: |
-            exported_fs/
+          path: exported_fs/
           retention-days: 1

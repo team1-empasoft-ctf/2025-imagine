@@ -1,5 +1,4 @@
-# .github/workflows/aws-access.yml
-name: AWS OIDC Access
+name: AWS OIDC Access Test
 
 on:
   workflow_dispatch:
@@ -8,24 +7,40 @@ jobs:
   assume-role:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write   # Required for OIDC
+      id-token: write       # Needed for OIDC authentication
       contents: read
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: us-east-1
 
-      - name: Check AWS Identity
-        run: aws sts get-caller-identity
-
-      - name: List ECR Repositories
-        run: aws ecr describe-repositories
-
-      - name: Dump secrets or configs
+      - name: Verify AWS identity
         run: |
-          aws s3 ls
-          aws ec2 describe-instances
-          aws secretsmanager list-secrets
+          echo "[*] Checking current identity..."
+          aws sts get-caller-identity
+
+      - name: List available ECR repositories
+        run: |
+          echo "[*] Listing ECR repositories..."
+          aws ecr describe-repositories || echo "No ECR repositories visible or permission denied."
+
+      - name: Try to list S3 buckets
+        run: |
+          echo "[*] Listing S3 buckets..."
+          aws s3 ls || echo "No access to S3 or empty."
+
+      - name: Try to list Secrets Manager entries
+        run: |
+          echo "[*] Listing secrets..."
+          aws secretsmanager list-secrets --max-items 10 || echo "No access to Secrets Manager."
+
+      - name: Dump AWS environment variables
+        run: |
+          echo "[*] Dumping AWS environment for debugging..."
+          env | grep AWS || echo "No AWS env vars found."

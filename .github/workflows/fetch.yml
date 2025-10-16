@@ -1,117 +1,93 @@
-name: Fetch Challenge Files
+name: Read Flag File
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  fetch-challenge:
+  read-flag:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Prefer OIDC role assumption (no long-lived secrets required)
-      - name: Configure AWS credentials (OIDC role)
+      - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: ap-east-1
 
-      # Fallback: if you DO have static AWS creds stored in secrets, uncomment/use this step instead of OIDC.
-      # - name: Configure AWS credentials (static credentials fallback)
-      #   if: ${{ secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' }}
-      #   uses: aws-actions/configure-aws-credentials@v4
-      #   with:
-      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      #     aws-region: ap-east-1
-
       - name: Login to ECR
         run: |
-          aws ecr get-login-password --region ap-east-1 \
-            | docker login --username AWS --password-stdin 396961015104.dkr.ecr.ap-east-1.amazonaws.com
+          aws ecr get-login-password --region ap-east-1 | docker login --username AWS --password-stdin 396961015104.dkr.ecr.ap-east-1.amazonaws.com
 
-      - name: Pull challenge image
+      - name: Pull challenge Docker image
         run: |
-          IMAGE=396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest
-          docker pull "$IMAGE"
+          docker pull 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest
 
-      - name: Inspect image (labels / env)
+      - name: Extract and read the flag file
         run: |
-          IMAGE=396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest
-          echo "=== docker inspect (summary) ==="
-          docker inspect --format='{{json .Config.Labels}}' "$IMAGE" || true
-          docker inspect --format='{{json .Config.Env}}' "$IMAGE" || true
-          echo "=== image history ==="
-          docker history --no-trunc "$IMAGE" || true
-
-      - name: Create container and export filesystem
-        id: export
-        run: |
-          IMAGE=396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest
-          CID=$(docker create "$IMAGE" /bin/sh || docker create "$IMAGE")
-          echo "CONTAINER=$CID" >> $GITHUB_OUTPUT
-          mkdir -p exported_fs
-          # export and extract in a controlled place
-          docker export "$CID" -o filesystem.tar
-          tar -xf filesystem.tar -C exported_fs
-          rm -f filesystem.tar
-
-      - name: Fix permissions for exported files (prevent upload errors)
-        run: |
-          # make files readable by runner (some files may be 000)
-          sudo find exported_fs -type f -exec chmod u+rw,go+r {} \; || true
-          sudo find exported_fs -type d -exec chmod u+rwx,go+rx {} \; || true
-          # ensure we don't include device files that may have been exported
-          find exported_fs -maxdepth 2 -name "dev" -prune -o -print | head -n 1
-
-      - name: Search exported FS for likely encrypted/flag files
-        run: |
-          echo "=== Searching exported_fs for candidate files ==="
-          # common names seen in challenge: not-flag-yet, output, *.enc, *.base64, wordlist*
-          find exported_fs -type f \( -iname "*flag*" -o -iname "not-flag-yet" -o -iname "output*" -o -iname "*.enc" -o -iname "*.base64" -o -iname "wordlist*" -o -iname "*.txt" \) -ls || true
-          # Copy a small subset to workspace root for easier use
-          mkdir -p challenge_artifacts
-          find exported_fs -type f \( -iname "not-flag-yet" -o -iname "output*" -o -iname "wordlist*" -o -iname "*.enc" -o -iname "*.base64" -o -iname "*.txt" \) -exec cp --parents '{}' challenge_artifacts/ \; || true
-          echo "=== done search ==="
-          ls -la challenge_artifacts || true
-
-      - name: Try automated decryption (optional)
-        run: |
-          # decrypt_script.py should exist in repo and accept input path(s).
-          # This step will only run if decrypt_script.py is present and there is something to decrypt.
-          if [ -f ./decrypt_script.py ] && [ -d ./challenge_artifacts ]; then
-            echo "Running decrypt_script.py against challenge_artifacts..."
-            python3 decrypt_script.py challenge_artifacts || echo "decrypt_script.py ran but returned non-zero"
-          else
-            echo "No decrypt_script.py in repo or no artifacts to run on — skipping automated decryption"
+          echo "=== Extracting and reading the not-flag-yet file ==="
+          
+          # Create container and extract the specific file
+          CONTAINER_ID=$(docker create 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest)
+          docker cp $CONTAINER_ID:/not-flag-yet ./not-flag-yet
+          docker rm $CONTAINER_ID
+          
+          echo "=== File content ==="
+          cat not-flag-yet
+          echo ""
+          
+          echo "=== File info ==="
+          ls -la not-flag-yet
+          file not-flag-yet
+          
+          echo "=== Hex dump (first 100 bytes) ==="
+          head -c 100 not-flag-yet | xxd
+          
+          echo "=== Checking if it's encoded ==="
+          # Check if it's base64 encoded
+          if base64 -d not-flag-yet > /dev/null 2>&1; then
+            echo "File appears to be base64 encoded. Decoding:"
+            base64 -d not-flag-yet
+            echo ""
           fi
+          
+          # Check if it's hex encoded
+          echo "=== Trying hex decode ==="
+          cat not-flag-yet | xxd -r -p 2>/dev/null | head -c 100 && echo " (hex decoded)" || echo "Not hex encoded"
+          
+          echo "=== Checking for common encodings ==="
+          # Check for rot13
+          cat not-flag-yet | tr 'A-Za-z' 'N-ZA-Mn-za-m' | head -c 50 && echo " (rot13)" || echo ""
+          
+          # Check for reversed text
+          cat not-flag-yet | rev | head -c 50 && echo " (reversed)" || echo ""
 
-      - name: Save image layers (optional debugging)
+      - name: Explore the container more thoroughly
         run: |
-          IMAGE=396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest
-          docker save "$IMAGE" -o image.tar || true
-          mkdir -p image_layers
-          # extract layer tars from image.tar (they might be named manifest.json + layers)
-          tar -xf image.tar -C image_layers || true
-          rm -f image.tar || true
-          # list some files
-          find image_layers -maxdepth 3 -type f -iname "*.tar" -ls || true
+          echo "=== Running container to explore further ==="
+          # Run the container and explore its filesystem
+          docker run --rm --entrypoint /bin/sh 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest -c "
+            echo '=== Container file listing ==='
+            ls -la /
+            echo ''
+            echo '=== Checking for other interesting files ==='
+            find / -name '*flag*' -o -name '*secret*' -o -name '*.txt' -o -name '*.sh' 2>/dev/null | head -20
+            echo ''
+            echo '=== Environment variables ==='
+            env | grep -i flag
+            echo ''
+            echo '=== Process list ==='
+            ps aux
+          "
 
-      - name: Upload found files (artifact)
+      - name: Upload the flag file as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: challenge-files
-          path: |
-            challenge_artifacts/**
-            exported_fs/**
-            image_layers/**
-            decrypt_output* 
+          name: flag-file
+          path: not-flag-yet
+          retention-days: 1

@@ -1,6 +1,5 @@
 name: Assume AWS Role
 on: [push]
-
 jobs:
   assume-role:
     runs-on: ubuntu-latest
@@ -8,79 +7,84 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::396961015104:role/imaginary-challenge
           aws-region: ap-east-1
           role-session-name: OIDCSession
-
+      
       - name: Login to ECR
-        id: ecr-login
         run: |
-          aws ecr get-login-password --region ap-east-1 \
-          | docker login --username AWS --password-stdin 396961015104.dkr.ecr.ap-east-1.amazonaws.com
-
+          aws ecr get-login-password --region ap-east-1 | docker login --username AWS --password-stdin 396961015104.dkr.ecr.ap-east-1.amazonaws.com
+      
       - name: Pull and extract imaginary-challenge image
         run: |
+          # Pull the latest image
           docker pull 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest
-
-          CONTAINER_ID=$(docker create 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest /bin/sh)
-
+          
+          # Create container and extract filesystem
+          CONTAINER_ID=$(docker create 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest)
           docker export $CONTAINER_ID > filesystem.tar
           tar -xf filesystem.tar
-
+          
+          # Look for encrypted data and wordlists
           echo "=== Searching for encrypted data and wordlists ==="
-          find . -type f \( -name "*.txt" -o -name "*.enc" -o -name "*.base64" -o -name "output" -o -name "flag*" \) -exec ls -la {} \;
-
-          find . -type f \( -name "*.txt" -o -name "output" \) -exec cp {} ./ \;
-
+          find . -type f \( -name ".txt" -o -name ".enc" -o -name ".base64" -o -name "output" -o -name "flag*" \) -exec ls -la {} \;
+          
+          # Copy any found text files
+          find . -type f \( -name ".txt" -o -name "output" \) -exec cp {} ./ \;
+          
+          # Cleanup
           docker rm $CONTAINER_ID
           rm -f filesystem.tar
-
+      
       - name: Extract Docker image layers
         run: |
+          # Save image and extract layers
           docker save 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest -o image.tar
           tar -xf image.tar
-
+          
+          # Extract all layer tarballs
           mkdir -p layers
           for layer in $(find . -name "*.tar" -type f | grep -v image.tar); do
             echo "Extracting layer: $(basename $layer)"
             tar -xf $layer -C layers/ 2>/dev/null || true
           done
-
+          
+          # Search for relevant files in layers
           echo "=== Searching in layers ==="
-          find layers/ -type f \( -name "*.txt" -o -name "*.py" -o -name "output*" -o -name "flag*" \) -exec ls -la {} \;
-
-          find layers/ -type f \( -name "*.txt" -o -name "output" \) -exec cp {} ./ \;
-
-      - name: Check image metadata
+          find layers/ -type f \( -name ".txt" -o -name ".py" -o -name "output*" -o -name "flag*" \) -exec ls -la {} \;
+          
+          # Copy any found files
+          find layers/ -type f \( -name ".txt" -o -name "output" \) -exec cp {} ./ \;
+      
+      - name: Check for encrypted data in image history
         run: |
-          echo "=== Image History ==="
+          # Inspect image history and labels
           docker inspect 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest | jq '.[0]'
-
+          
+          # Check environment variables and labels
           echo "=== Image Labels ==="
           docker inspect 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest | jq '.[0].Config.Labels'
-
+          
           echo "=== Image Env ==="
           docker inspect 396961015104.dkr.ecr.ap-east-1.amazonaws.com/challenges/imaginary-challenge:latest | jq '.[0].Config.Env'
-
-      - name: Attempt decryption if files exist
+      
+      - name: Decrypt if we have the necessary files
         run: |
+          # Check if we have both encrypted data and wordlist
           if [ -f "output.txt" ] && [ -f "wordlist.txt" ]; then
             echo "Found encrypted data and wordlist - attempting decryption"
-            python3 decrypt_script.py || echo "Decryption failed"
+            python3 decrypt_script.py
           elif [ -f "not-flag-yet" ] && [ -f "wordlist.txt" ]; then
             echo "Found encrypted file and wordlist - attempting decryption"
-            python3 decrypt_script.py || echo "Decryption failed"
+            python3 decrypt_script.py
           else
-            echo "Missing encrypted data or wordlist for decryption"
+            echo "Missing either encrypted data or wordlist for decryption"
             ls -la *.txt 2>/dev/null || echo "No text files found"
           fi
-
+      
       - name: Upload found files
         uses: actions/upload-artifact@v4
         with:
